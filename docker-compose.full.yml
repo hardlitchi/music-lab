@@ -22,7 +22,7 @@ services:
       - "${ACESTEP_PORT:-8000}:8000"
     volumes:
       - audio-data:/app/outputs
-      - acestep-models:/home/appuser/.cache/huggingface
+      - acestep-models:/home/appuser/.cache   # .cache 全体を永続化 (huggingface / ace-step / torch)
     environment:
       PORT: "8000"
       OUTPUT_DIR: "/app/outputs"

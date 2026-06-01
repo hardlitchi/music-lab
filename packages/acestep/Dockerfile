@@ -39,12 +39,15 @@ RUN pip install --no-cache-dir \
     "git+https://github.com/ace-step/ACE-Step.git" \
     --extra-index-url "$TORCH_INDEX_URL"
 
-# 非 root ユーザー
-RUN useradd -m -u 1001 appuser
+# 非 root ユーザーと必要なディレクトリを作成
+RUN useradd -m -u 1001 appuser && \
+    mkdir -p /app/outputs \
+             /home/appuser/.cache/ace-step \
+             /home/appuser/.cache/huggingface \
+             /home/appuser/.cache/torch && \
+    chown -R appuser:appuser /app /home/appuser/.cache
 
 WORKDIR /app
-RUN mkdir -p /app/outputs && chown -R appuser:appuser /app
-
 COPY --chown=appuser packages/acestep/infer_server.py /app/
 
 USER appuser
@@ -66,6 +69,6 @@ r = urllib.request.urlopen('http://localhost:8000/health', timeout=10); \
 d = json.loads(r.read()); \
 sys.exit(0 if d.get('model_loaded') else 1)"
 
-VOLUME ["/app/outputs", "/home/appuser/.cache/huggingface"]
+VOLUME ["/app/outputs", "/home/appuser/.cache"]
 
 CMD ["python", "/app/infer_server.py"]
