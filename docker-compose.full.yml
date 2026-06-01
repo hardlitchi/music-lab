@@ -2,24 +2,20 @@
 #  楽曲工房 — ACE-Step 拡張構成 (CPU / GPU 両対応)
 #
 #  使用方法:
-#    docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
-#    または: bash scripts/deploy-full.sh  (GPU 自動検出)
+#    bash scripts/deploy-full.sh  (GPU 自動検出)
 #
-#  GPU を使いたい場合は docker-compose.gpu.yml も重ねる:
-#    docker compose -f docker-compose.yml \
-#                   -f docker-compose.full.yml \
-#                   -f docker-compose.gpu.yml up -d
-#    または: bash scripts/deploy-full.sh  (nvidia-smi あれば自動)
+#  起動順:
+#    1. acestep コンテナ起動 (サーバー即起動、モデルはバックグラウンドロード)
+#    2. server / frontend が起動
+#    3. モデルロード完了後、UI の「ACE-Step 接続済」に切り替わる
 #
 #  ⚠ CPU モード: 生成に数十分かかる場合があります
-#    GPU モード: NVIDIA GPU + nvidia-container-toolkit が必要
 # ============================================================
 services:
   acestep:
     build:
       context: .
       dockerfile: packages/acestep/Dockerfile
-      # GPU ビルド時は docker-compose.gpu.yml で TORCH_INDEX_URL を上書き
     image: music-lab-acestep
     container_name: music-lab-acestep
     ports:
@@ -39,27 +35,21 @@ services:
         - "CMD"
         - "python3"
         - "-c"
-        - |
-          import urllib.request, json, sys
-          try:
-            r = urllib.request.urlopen('http://localhost:8000/health', timeout=10)
-            d = json.loads(r.read())
-            sys.exit(0 if d.get('model_loaded') else 1)
-          except Exception:
-            sys.exit(1)
+        - "import urllib.request,json,sys; r=urllib.request.urlopen('http://localhost:8000/health',timeout=10); d=json.loads(r.read()); sys.exit(0 if d.get('model_loaded') else 1)"
       interval: 30s
       timeout: 15s
-      retries: 30
-      start_period: 600s   # 初回モデルDL (~5GB) + CPU ロード時間を考慮
+      retries: 40          # 最大 40 回 × 30s = 20 分待機
+      start_period: 60s    # サーバー起動後 60s で healthcheck 開始
     restart: unless-stopped
 
-  # server が ACE-Step コンテナを参照するよう上書き
+  # server は acestep が「起動した」時点でスタート (モデルロード完了は待たない)
+  # モデルロード中は UI の「ACE-Step 接続中」バナーで状態を表示する
   server:
     environment:
       ACESTEP_API_URL: "http://acestep:8000"
     depends_on:
       acestep:
-        condition: service_healthy
+        condition: service_started   # service_healthy ではなく service_started
 
 volumes:
   audio-data:
