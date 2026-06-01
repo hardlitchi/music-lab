@@ -1,0 +1,64 @@
+# ============================================================
+#  楽曲工房 — ACE-Step GPU 拡張構成
+#
+#  必要要件:
+#    - NVIDIA GPU (8GB+ VRAM 推奨)
+#    - nvidia-container-toolkit インストール済み
+#      https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+#  使用方法:
+#    docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
+#    または: bash scripts/deploy-full.sh
+# ============================================================
+services:
+  acestep:
+    build:
+      context: .
+      dockerfile: packages/acestep/Dockerfile
+    image: music-lab-acestep
+    container_name: music-lab-acestep
+    ports:
+      - "${ACESTEP_PORT:-8000}:8000"
+    volumes:
+      - audio-data:/app/outputs
+      - acestep-models:/home/appuser/.cache/huggingface
+    environment:
+      PORT: "8000"
+      OUTPUT_DIR: "/app/outputs"
+      BF16: "${ACESTEP_BF16:-true}"
+      TORCH_COMPILE: "${ACESTEP_TORCH_COMPILE:-false}"
+      CPU_OFFLOAD: "${ACESTEP_CPU_OFFLOAD:-false}"
+      OVERLAPPED_DECODE: "${ACESTEP_OVERLAPPED_DECODE:-false}"
+    # NVIDIA GPU アクセス
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-c"
+        - "curl -sf http://localhost:8000/health | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d[\"model_loaded\"] else 1)'"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s   # モデル初回ダウンロード (~5GB) を考慮
+    restart: unless-stopped
+
+  # server が ACE-Step コンテナを参照するよう上書き
+  server:
+    environment:
+      ACESTEP_API_URL: "http://acestep:8000"
+    depends_on:
+      acestep:
+        condition: service_healthy
+
+volumes:
+  audio-data:
+    driver: local
+  acestep-models:
+    driver: local   # HuggingFace モデルキャッシュを永続化 (~5GB)

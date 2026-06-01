@@ -1,3 +1,11 @@
+# ============================================================
+#  楽曲工房 — ベース構成 (frontend + server)
+#  GPU なし / ACE-Step なしで動作します
+#
+#  フル構成 (ACE-Step込み) は docker-compose.full.yml を参照:
+#    docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
+#    または scripts/deploy-full.sh を使用
+# ============================================================
 services:
   frontend:
     build:
@@ -26,7 +34,11 @@ services:
       PORT: "8001"
       NODE_ENV: "${NODE_ENV:-production}"
       CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:${FRONTEND_PORT:-5200}}"
-      ACESTEP_API_URL: "${ACESTEP_API_URL:-http://localhost:8001}"
+      # docker-compose.full.yml で http://acestep:8000 に上書きされる
+      ACESTEP_API_URL: "${ACESTEP_API_URL:-http://localhost:${ACESTEP_PORT:-8000}}"
+      AUDIO_OUTPUT_DIR: "/app/outputs"
+    volumes:
+      - audio-data:/app/outputs
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
       interval: 10s
@@ -34,3 +46,7 @@ services:
       retries: 5
       start_period: 15s
     restart: unless-stopped
+
+volumes:
+  audio-data:
+    driver: local

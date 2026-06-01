@@ -26,9 +26,12 @@ COPY --from=builder /app/packages/server/dist packages/server/dist
 
 ENV PORT=8001
 ENV NODE_ENV=production
+ENV AUDIO_OUTPUT_DIR=/app/outputs
 EXPOSE 8001
 
-# wget for healthcheck (already in alpine, just confirming)
-RUN apk add --no-cache wget
+RUN apk add --no-cache wget && mkdir -p /app/outputs
+
+# ACE-Step と共有する音声出力ディレクトリ
+VOLUME ["/app/outputs"]
 
 CMD ["node", "packages/server/dist/index.js"]
