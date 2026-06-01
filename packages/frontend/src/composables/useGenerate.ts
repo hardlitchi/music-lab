@@ -1,10 +1,6 @@
 /**
  * 実 ACE-Step 生成 composable
  * POST /api/generate → ジョブID取得 → ポーリング → Takes 返却
- *
- * 信頼性向上:
- *  - ポーリング中のネットワーク断は自動リトライ (最大 10 連続失敗で中断)
- *  - jobId を sessionStorage に保存 → リロード後も復旧可能
  */
 import { ref } from 'vue'
 import type { Take, GenerateJob } from '@/types'
@@ -14,10 +10,12 @@ const API = '/api'
 const SESSION_KEY = 'music-lab:activeJobId'
 
 export function useGenerate() {
-  const genPhase = ref<'idle' | 'running' | 'done' | 'error'>('idle')
-  const genPct   = ref(0)
-  const genStage = ref('')
-  const genError = ref<string | null>(null)
+  const genPhase    = ref<'idle' | 'running' | 'done' | 'error'>('idle')
+  const genPct      = ref(0)
+  const genStage    = ref('')
+  const genError    = ref<string | null>(null)
+  // 連続失敗カウント (UI 表示用)
+  const retryCount  = ref(0)
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   function stop() {
@@ -25,67 +23,55 @@ export function useGenerate() {
   }
 
   async function generate(params: {
-    caption: string
-    lyrics: string
-    task: TaskId
-    meta: MetaState
-    engine: EngineState
-    thinking: boolean
-    repaintStart?: number
-    repaintEnd?: number
+    caption: string; lyrics: string; task: TaskId
+    meta: MetaState; engine: EngineState; thinking: boolean
+    repaintStart?: number; repaintEnd?: number
   }): Promise<Take[]> {
     stop()
-    genPhase.value = 'running'
-    genPct.value   = 0
-    genStage.value = 'ACE-Step に接続中...'
-    genError.value = null
+    genPhase.value   = 'running'
+    genPct.value     = 0
+    genStage.value   = 'ACE-Step に接続中...'
+    genError.value   = null
+    retryCount.value = 0
 
     const { caption, lyrics, task, meta, engine, repaintStart, repaintEnd } = params
     const seeds = Array.from({ length: engine.batch }, (_, i) =>
       engine.lockSeed ? +engine.seed + i : Math.floor(10000 + Math.random() * 89999)
     )
 
-    const body = {
-      caption, lyrics, task,
-      duration:     meta.duration,
-      steps:        engine.steps,
-      cfg:          engine.cfg,
-      cfgEnabled:   engine.lm !== 'none',
-      batch:        engine.batch,
-      seeds,
-      schedulerType: engine.infer,
-      omegaScale:   engine.shift,
-      repaintStart: repaintStart ?? 0,
-      repaintEnd:   repaintEnd   ?? 0,
-    }
-
     const startResp = await fetch(`${API}/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        caption, lyrics, task,
+        duration: meta.duration, steps: engine.steps,
+        cfg: engine.cfg, cfgEnabled: engine.lm !== 'none',
+        batch: engine.batch, seeds,
+        schedulerType: engine.infer, omegaScale: engine.shift,
+        repaintStart: repaintStart ?? 0, repaintEnd: repaintEnd ?? 0,
+      }),
     })
+
     if (!startResp.ok) {
       const err = await startResp.text().catch(() => 'unknown error')
       throw new Error(`生成リクエスト失敗 (${startResp.status}): ${err}`)
     }
     const { jobId } = await startResp.json() as { jobId: string }
-
-    // jobId を保存 → リロード後に参照可能
     sessionStorage.setItem(SESSION_KEY, jobId)
 
     return pollUntilDone(jobId, params, seeds)
   }
 
-  /** jobId を指定して既存ジョブをポーリング再開 (ページリロード後の復旧用) */
   function resume(jobId: string, params: {
     caption: string; lyrics: string; task: TaskId
     meta: MetaState; engine: EngineState; thinking: boolean
   }, seeds: number[]): Promise<Take[]> {
     stop()
-    genPhase.value = 'running'
-    genPct.value   = 0
-    genStage.value = 'ジョブに再接続中...'
-    genError.value = null
+    genPhase.value   = 'running'
+    genPct.value     = 0
+    genStage.value   = 'ジョブに再接続中...'
+    genError.value   = null
+    retryCount.value = 0
     return pollUntilDone(jobId, params, seeds)
   }
 
@@ -94,15 +80,18 @@ export function useGenerate() {
     params: { caption: string; lyrics: string; task: TaskId; meta: MetaState; engine: EngineState; thinking: boolean },
     seeds: number[],
   ): Promise<Take[]> {
-    let consecutiveFails = 0
-    const MAX_FAILS = 10   // 20 秒間応答なし → エラー
+    let fails = 0
+    // 最大 150 回連続失敗 (= 5 分) まで無視してリトライ
+    // CPU 生成中のブラウザ throttling・一時的なネットワーク断に対応
+    const MAX_CONSECUTIVE_FAILS = 150
 
     return new Promise((resolve, reject) => {
       pollTimer = setInterval(async () => {
         try {
           const r = await fetch(`${API}/generate/${jobId}`)
-          if (!r.ok) { consecutiveFails++; return }
-          consecutiveFails = 0
+          if (!r.ok) { fails++; retryCount.value = fails; return }
+          fails = 0
+          retryCount.value = 0
 
           const job = await r.json() as GenerateJob
           genPct.value   = job.progress
@@ -121,25 +110,29 @@ export function useGenerate() {
             reject(new Error(job.error ?? '不明なエラー'))
           }
         } catch {
-          consecutiveFails++
-          if (consecutiveFails >= MAX_FAILS) {
-            stop()
+          fails++
+          retryCount.value = fails
+          // 連続失敗が閾値を超えたらエラー状態へ (ポーリングは継続)
+          if (fails >= MAX_CONSECUTIVE_FAILS) {
             genPhase.value = 'error'
-            genError.value = `サーバーに接続できません。ネットワークを確認してください。\n(jobId: ${jobId} — リロード後に「生成を再開」で復旧できます)`
+            genError.value =
+              `サーバーに 5 分以上接続できません。\n` +
+              `生成は ACE-Step 側で継続中の可能性があります。\n` +
+              `接続が回復したら「生成を再開」を押してください。\n` +
+              `(jobId: ${jobId})`
+            stop()
             reject(new Error('fetch failed'))
           }
-          // それ以外: 一時断として無視して継続
         }
       }, 2000)
     })
   }
 
-  /** sessionStorage に保存された jobId を返す */
   function getSavedJobId(): string | null {
     return sessionStorage.getItem(SESSION_KEY)
   }
 
-  return { genPhase, genPct, genStage, genError, generate, resume, stop, getSavedJobId }
+  return { genPhase, genPct, genStage, genError, retryCount, generate, resume, stop, getSavedJobId }
 }
 
 function buildTake(
@@ -164,7 +157,6 @@ function buildTake(
       quality:   0.7 + Math.random() * 0.27,
       diversity: 0.5 + Math.random() * 0.45,
     },
-    saved:    false,
-    audioUrl: serverTake.audioUrl,
+    saved: false, audioUrl: serverTake.audioUrl,
   }
 }

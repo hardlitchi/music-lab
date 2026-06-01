@@ -62,7 +62,7 @@ const estTime = computed(() => {
 
 // ── 生成 ──
 const takes = ref<Take[]>([])
-const { genPhase, genPct, genStage, genError, generate, resume, stop, getSavedJobId } = useGenerate()
+const { genPhase, genPct, genStage, genError, retryCount, generate, resume, stop, getSavedJobId } = useGenerate()
 onUnmounted(stop)
 
 // ACE-Step 接続状態
@@ -368,7 +368,10 @@ async function resumeJob() {
           </button>
           <div class="gen-est mono">
             <template v-if="genPhase === 'running'">
-              <span v-if="genPct >= 98" class="waiting-pulse">
+              <span v-if="retryCount > 3" class="waiting-pulse">
+                再接続中... ({{ retryCount }}回) — 生成は継続中です
+              </span>
+              <span v-else-if="genPct >= 98" class="waiting-pulse">
                 ACE-Step 処理中 — 完了まで数分〜数十分かかります...
               </span>
               <span v-else>{{ Math.round(genPct) }}% — {{ genStage }}</span>
