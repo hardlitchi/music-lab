@@ -137,11 +137,11 @@ async function runGeneration(jobId: string, body: GenerateRequest): Promise<void
         repaint_end: repaintEnd ?? 0,
       }
 
+      // タイムアウトなし: CPU モードでは生成に数時間かかる場合がある
       const resp = await fetch(`${ACESTEP_API_URL}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(600_000), // 10分タイムアウト
       })
 
       if (!resp.ok) {

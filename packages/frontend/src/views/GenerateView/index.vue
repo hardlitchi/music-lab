@@ -62,7 +62,7 @@ const estTime = computed(() => {
 
 // ── 生成 ──
 const takes = ref<Take[]>([])
-const { genPhase, genPct, genStage, genError, generate, stop } = useGenerate()
+const { genPhase, genPct, genStage, genError, generate, resume, stop, getSavedJobId } = useGenerate()
 onUnmounted(stop)
 
 // ACE-Step 接続状態
@@ -127,6 +127,24 @@ function formatCaption() {
 function saveTake(take: Take) {
   takes.value = takes.value.map(t => t.id === take.id ? { ...t, saved: true } : t)
   store.saveTake(take)
+}
+
+async function resumeJob() {
+  const jobId = getSavedJobId()
+  if (!jobId) return
+  try {
+    const seeds = Array.from({ length: engine.value.batch }, (_, i) =>
+      engine.value.lockSeed ? +engine.value.seed + i : Math.floor(10000 + Math.random() * 89999)
+    )
+    const newTakes = await resume(jobId, {
+      caption: caption.value, lyrics: lyrics.value, task: task.value,
+      meta: meta.value, engine: engine.value, thinking: thinking.value,
+    }, seeds)
+    takes.value = [...newTakes, ...takes.value]
+    aceStepConnected.value = true
+  } catch (err: any) {
+    console.error('[resume]', err)
+  }
 }
 </script>
 
@@ -368,10 +386,18 @@ function saveTake(take: Take) {
               :style="{ width: genPct + '%' }"
             />
           </div>
-          <!-- エラー表示 -->
+          <!-- エラー表示 + 再開ボタン -->
           <div v-if="genPhase === 'error' && genError" class="gen-error mono">
             ⚠ {{ genError }}
           </div>
+          <button
+            v-if="genPhase === 'error' && getSavedJobId()"
+            class="btn btn-outline btn-sm"
+            style="margin-top:4px"
+            @click="resumeJob"
+          >
+            🔄 生成を再開 (jobId: {{ getSavedJobId()?.slice(0,8) }}...)
+          </button>
         </div>
       </div>
     </div>
