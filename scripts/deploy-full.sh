@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================
-#  deploy-full.sh — ACE-Step 込みフル構成でデプロイ (GPU 必須)
+#  deploy-full.sh — ACE-Step 込みフル構成でデプロイ
 #
-#  前提条件:
-#    - NVIDIA GPU (8GB+ VRAM)
-#    - nvidia-container-toolkit インストール済み
-#      https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-#    - docker compose v2.20+
+#  GPU 自動検出:
+#    nvidia-smi が使える → CUDA GPU ビルド (高速)
+#    nvidia-smi がない  → CPU ビルド (遅いが動作可能)
+#
+#  手動で CPU/GPU を強制したい場合:
+#    FORCE_CPU=true bash scripts/deploy-full.sh
+#    FORCE_GPU=true bash scripts/deploy-full.sh
 # =============================================================
 set -euo pipefail
 
@@ -24,53 +26,69 @@ FRONTEND_PORT="${FRONTEND_PORT:-5200}"
 SERVER_PORT="${SERVER_PORT:-4001}"
 ACESTEP_PORT="${ACESTEP_PORT:-8000}"
 
-# GPU の存在確認
-if ! command -v nvidia-smi &>/dev/null; then
-  echo "⚠  nvidia-smi が見つかりません。"
-  echo "   このスクリプトは NVIDIA GPU 環境が必要です。"
-  echo "   GPU なし構成は: bash scripts/deploy.sh"
-  exit 1
+# ── GPU/CPU 判定 ──────────────────────────────────────────────
+USE_GPU=false
+if [[ "${FORCE_GPU:-}" == "true" ]]; then
+  USE_GPU=true
+elif [[ "${FORCE_CPU:-}" == "true" ]]; then
+  USE_GPU=false
+elif command -v nvidia-smi &>/dev/null && nvidia-smi --query-gpu=name --format=csv,noheader &>/dev/null; then
+  USE_GPU=true
 fi
 
+# ── Compose ファイルリスト ──────────────────────────────────────
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.full.yml"
+if [[ "$USE_GPU" == "true" ]]; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.gpu.yml"
+fi
+
+# ── 表示 ──────────────────────────────────────────────────────
 echo ""
 echo "🚀  楽曲工房 (ACE-Step フル構成) — デプロイ開始"
 echo "────────────────────────────────────────────────"
 echo "  フロントエンド  → http://localhost:${FRONTEND_PORT}"
 echo "  API サーバー    → http://localhost:${SERVER_PORT}"
 echo "  ACE-Step        → http://localhost:${ACESTEP_PORT}"
+echo ""
+if [[ "$USE_GPU" == "true" ]]; then
+  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "GPU")
+  echo "  🎮 GPU モード: ${GPU_NAME}"
+else
+  echo "  🖥  CPU モード (GPU 未検出)"
+  echo "  ⚠  CPU での生成は非常に低速です (60秒の曲で数十分かかる場合があります)"
+  echo "     GPU 環境での使用を強く推奨します"
+fi
 echo "────────────────────────────────────────────────"
 echo ""
-echo "  ⚠ ACE-Step コンテナ初回起動時はモデルのダウンロード (~5GB) が行われます"
-echo "    healthcheck が通るまで数分〜数十分かかる場合があります"
+echo "  ⏳ 初回起動時はモデルのダウンロード (~5GB) が行われます"
 echo ""
 
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.full.yml \
-  up --build -d
+# ── ビルド & 起動 ───────────────────────────────────────────────
+docker compose $COMPOSE_FILES up --build -d
 
+# ── サーバーの起動を確認 ───────────────────────────────────────
 echo ""
-echo "⏳  サービスの起動を確認中 (ACE-Step は時間がかかります)..."
-
-# server の healthy を待機
-MAX_WAIT=60; ELAPSED=0
-until docker compose ps server | grep -q "healthy" || [[ $ELAPSED -ge $MAX_WAIT ]]; do
+echo "⏳  server の起動を確認中..."
+MAX_WAIT=90; ELAPSED=0
+until docker compose $COMPOSE_FILES ps server | grep -q "healthy" || [[ $ELAPSED -ge $MAX_WAIT ]]; do
   sleep 3; ELAPSED=$((ELAPSED + 3)); echo -n "."
 done
 echo ""
 
-if docker compose ps server | grep -q "healthy"; then
-  echo "✅  server 起動完了"
+if docker compose $COMPOSE_FILES ps server | grep -q "healthy"; then
+  echo "✅  デプロイ完了！"
 else
-  echo "⚠  server のヘルスチェックがタイムアウト"
+  echo "⚠  server のヘルスチェックがタイムアウトしました"
+  echo "   docker compose $COMPOSE_FILES logs server でログを確認してください"
 fi
 
 echo ""
-echo "💡  ACE-Step の起動状況確認:"
-echo "    docker compose -f docker-compose.yml -f docker-compose.full.yml logs -f acestep"
+echo "  🌐 アプリ         → http://localhost:${FRONTEND_PORT}"
+echo "  🔌 API            → http://localhost:${SERVER_PORT}/health"
+echo "  🎵 ACE-Step 状況 → http://localhost:${ACESTEP_PORT}/health"
 echo ""
-echo "  🌐 アプリ     → http://localhost:${FRONTEND_PORT}"
-echo "  🔌 API        → http://localhost:${SERVER_PORT}/health"
-echo "  🎵 ACE-Step   → http://localhost:${ACESTEP_PORT}/health"
-echo "  停止: scripts/stop-full.sh"
+echo "  ACE-Step ログ確認:"
+echo "  docker compose $COMPOSE_FILES logs -f acestep"
+echo ""
+echo "  停止: bash scripts/stop-full.sh"
 echo ""

@@ -1,20 +1,25 @@
 # ============================================================
-#  楽曲工房 — ACE-Step GPU 拡張構成
-#
-#  必要要件:
-#    - NVIDIA GPU (8GB+ VRAM 推奨)
-#    - nvidia-container-toolkit インストール済み
-#      https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#  楽曲工房 — ACE-Step 拡張構成 (CPU / GPU 両対応)
 #
 #  使用方法:
 #    docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
-#    または: bash scripts/deploy-full.sh
+#    または: bash scripts/deploy-full.sh  (GPU 自動検出)
+#
+#  GPU を使いたい場合は docker-compose.gpu.yml も重ねる:
+#    docker compose -f docker-compose.yml \
+#                   -f docker-compose.full.yml \
+#                   -f docker-compose.gpu.yml up -d
+#    または: bash scripts/deploy-full.sh  (nvidia-smi あれば自動)
+#
+#  ⚠ CPU モード: 生成に数十分かかる場合があります
+#    GPU モード: NVIDIA GPU + nvidia-container-toolkit が必要
 # ============================================================
 services:
   acestep:
     build:
       context: .
       dockerfile: packages/acestep/Dockerfile
+      # GPU ビルド時は docker-compose.gpu.yml で TORCH_INDEX_URL を上書き
     image: music-lab-acestep
     container_name: music-lab-acestep
     ports:
@@ -25,28 +30,27 @@ services:
     environment:
       PORT: "8000"
       OUTPUT_DIR: "/app/outputs"
-      BF16: "${ACESTEP_BF16:-true}"
+      BF16: "${ACESTEP_BF16:-auto}"
       TORCH_COMPILE: "${ACESTEP_TORCH_COMPILE:-false}"
       CPU_OFFLOAD: "${ACESTEP_CPU_OFFLOAD:-false}"
       OVERLAPPED_DECODE: "${ACESTEP_OVERLAPPED_DECODE:-false}"
-    # NVIDIA GPU アクセス
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     healthcheck:
       test:
         - "CMD"
-        - "sh"
+        - "python3"
         - "-c"
-        - "curl -sf http://localhost:8000/health | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d[\"model_loaded\"] else 1)'"
+        - |
+          import urllib.request, json, sys
+          try:
+            r = urllib.request.urlopen('http://localhost:8000/health', timeout=10)
+            d = json.loads(r.read())
+            sys.exit(0 if d.get('model_loaded') else 1)
+          except Exception:
+            sys.exit(1)
       interval: 30s
-      timeout: 10s
-      retries: 20
-      start_period: 300s   # モデル初回ダウンロード (~5GB) を考慮
+      timeout: 15s
+      retries: 30
+      start_period: 600s   # 初回モデルDL (~5GB) + CPU ロード時間を考慮
     restart: unless-stopped
 
   # server が ACE-Step コンテナを参照するよう上書き
@@ -61,4 +65,4 @@ volumes:
   audio-data:
     driver: local
   acestep-models:
-    driver: local   # HuggingFace モデルキャッシュを永続化 (~5GB)
+    driver: local

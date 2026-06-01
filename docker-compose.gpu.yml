@@ -1,0 +1,27 @@
+# ============================================================
+#  楽曲工房 — GPU オーバーライド
+#
+#  前提: NVIDIA GPU + nvidia-container-toolkit
+#  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+#  使用方法 (docker-compose.full.yml と組み合わせる):
+#    docker compose -f docker-compose.yml \
+#                   -f docker-compose.full.yml \
+#                   -f docker-compose.gpu.yml up -d
+# ============================================================
+services:
+  acestep:
+    build:
+      args:
+        # CUDA 12.6 対応 PyTorch を使用
+        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"
+    image: music-lab-acestep-gpu   # CPU 版と別イメージ名
+    environment:
+      BF16: "${ACESTEP_BF16:-true}"   # GPU では bfloat16 推奨
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
