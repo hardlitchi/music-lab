@@ -1,6 +1,5 @@
 /**
  * 実 ACE-Step 生成 composable
- * POST /api/generate → ジョブID取得 → ポーリング → Takes 返却
  */
 import { ref } from 'vue'
 import type { Take, GenerateJob } from '@/types'
@@ -9,13 +8,32 @@ import type { EngineState, MetaState, TaskId } from '@/types'
 const API = '/api'
 const SESSION_KEY = 'music-lab:activeJobId'
 
+/** fetch を最大 retries 回リトライ (指数バックオフ) */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  retries = 3,
+): Promise<Response> {
+  let lastErr: unknown
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fetch(url, options)
+    } catch (e) {
+      lastErr = e
+      if (i < retries - 1) {
+        await new Promise(r => setTimeout(r, 1500 * (i + 1)))
+      }
+    }
+  }
+  throw lastErr
+}
+
 export function useGenerate() {
-  const genPhase    = ref<'idle' | 'running' | 'done' | 'error'>('idle')
-  const genPct      = ref(0)
-  const genStage    = ref('')
-  const genError    = ref<string | null>(null)
-  // 連続失敗カウント (UI 表示用)
-  const retryCount  = ref(0)
+  const genPhase   = ref<'idle' | 'running' | 'done' | 'error'>('idle')
+  const genPct     = ref(0)
+  const genStage   = ref('')
+  const genError   = ref<string | null>(null)
+  const retryCount = ref(0)
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   function stop() {
@@ -30,32 +48,59 @@ export function useGenerate() {
     stop()
     genPhase.value   = 'running'
     genPct.value     = 0
-    genStage.value   = 'ACE-Step に接続中...'
+    genStage.value   = 'サーバーに接続中...'
     genError.value   = null
     retryCount.value = 0
+
+    // ① サーバー疎通確認
+    try {
+      await fetchWithRetry(`${API}/health`, {}, 2)
+    } catch {
+      throw new Error(
+        `API サーバーに接続できません。\n` +
+        `コンテナが起動しているか確認してください:\n` +
+        `  docker compose logs server`
+      )
+    }
 
     const { caption, lyrics, task, meta, engine, repaintStart, repaintEnd } = params
     const seeds = Array.from({ length: engine.batch }, (_, i) =>
       engine.lockSeed ? +engine.seed + i : Math.floor(10000 + Math.random() * 89999)
     )
 
-    const startResp = await fetch(`${API}/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        caption, lyrics, task,
-        duration: meta.duration, steps: engine.steps,
-        cfg: engine.cfg, cfgEnabled: engine.lm !== 'none',
-        batch: engine.batch, seeds,
-        schedulerType: engine.infer, omegaScale: engine.shift,
-        repaintStart: repaintStart ?? 0, repaintEnd: repaintEnd ?? 0,
-      }),
-    })
+    // ② 生成ジョブ開始 (リトライあり)
+    genStage.value = 'ACE-Step に接続中...'
+    let startResp: Response
+    try {
+      startResp = await fetchWithRetry(
+        `${API}/generate`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            caption, lyrics, task,
+            duration: meta.duration, steps: engine.steps,
+            cfg: engine.cfg, cfgEnabled: engine.lm !== 'none',
+            batch: engine.batch, seeds,
+            schedulerType: engine.infer, omegaScale: engine.shift,
+            repaintStart: repaintStart ?? 0, repaintEnd: repaintEnd ?? 0,
+          }),
+        },
+        3,
+      )
+    } catch {
+      throw new Error(
+        `生成リクエストが失敗しました。\n` +
+        `サーバーログを確認してください:\n` +
+        `  docker compose logs server --tail=20`
+      )
+    }
 
     if (!startResp.ok) {
-      const err = await startResp.text().catch(() => 'unknown error')
-      throw new Error(`生成リクエスト失敗 (${startResp.status}): ${err}`)
+      const err = await startResp.text().catch(() => '')
+      throw new Error(`生成リクエスト失敗 (${startResp.status}): ${err.slice(0, 200)}`)
     }
+
     const { jobId } = await startResp.json() as { jobId: string }
     sessionStorage.setItem(SESSION_KEY, jobId)
 
@@ -81,9 +126,7 @@ export function useGenerate() {
     seeds: number[],
   ): Promise<Take[]> {
     let fails = 0
-    // 最大 150 回連続失敗 (= 5 分) まで無視してリトライ
-    // CPU 生成中のブラウザ throttling・一時的なネットワーク断に対応
-    const MAX_CONSECUTIVE_FAILS = 150
+    const MAX_FAILS = 150  // 5 分間の連続失敗まで無視
 
     return new Promise((resolve, reject) => {
       pollTimer = setInterval(async () => {
@@ -112,16 +155,15 @@ export function useGenerate() {
         } catch {
           fails++
           retryCount.value = fails
-          // 連続失敗が閾値を超えたらエラー状態へ (ポーリングは継続)
-          if (fails >= MAX_CONSECUTIVE_FAILS) {
+          if (fails >= MAX_FAILS) {
+            stop()
             genPhase.value = 'error'
             genError.value =
               `サーバーに 5 分以上接続できません。\n` +
               `生成は ACE-Step 側で継続中の可能性があります。\n` +
               `接続が回復したら「生成を再開」を押してください。\n` +
               `(jobId: ${jobId})`
-            stop()
-            reject(new Error('fetch failed'))
+            reject(new Error(genError.value!))
           }
         }
       }, 2000)
