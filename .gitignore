@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+packages/*/node_modules/
+
+# build outputs
+packages/frontend/dist/
+packages/server/dist/
+
+# environment variables
+.env
+# ↑ .env.example はコミット対象
+
+# logs
+*.log
+npm-debug.log*
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# test artifacts
+screenshot-*.png
+.playwright-mcp/
+
+# Docker volumes
+.docker/

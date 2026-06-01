@@ -1,0 +1,36 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:${SERVER_PORT:-4001}}
+    image: music-lab-frontend
+    container_name: music-lab-frontend
+    ports:
+      - "${FRONTEND_PORT:-5200}:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    image: music-lab-server
+    container_name: music-lab-server
+    ports:
+      - "${SERVER_PORT:-4001}:8001"
+    environment:
+      PORT: "8001"
+      NODE_ENV: "${NODE_ENV:-production}"
+      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:${FRONTEND_PORT:-5200}}"
+      ACESTEP_API_URL: "${ACESTEP_API_URL:-http://localhost:8001}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped

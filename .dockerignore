@@ -1,0 +1,10 @@
+node_modules
+packages/*/node_modules
+packages/frontend/dist
+packages/server/dist
+.git
+.gitignore
+*.md
+screenshots
+screenshot-*.png
+.playwright-mcp
