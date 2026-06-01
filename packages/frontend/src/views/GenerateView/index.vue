@@ -349,14 +349,24 @@ function saveTake(take: Take) {
             </template>
           </button>
           <div class="gen-est mono">
-            {{ genPhase === 'running'
-              ? `${Math.round(genPct)}%`
-              : aceStepConnected
+            <template v-if="genPhase === 'running'">
+              <span v-if="genPct >= 98" class="waiting-pulse">
+                ACE-Step 処理中 — 完了まで数分〜数十分かかります...
+              </span>
+              <span v-else>{{ Math.round(genPct) }}% — {{ genStage }}</span>
+            </template>
+            <template v-else>
+              {{ aceStepConnected
                 ? `推定 ~${estTime}s · seed ${engine.lockSeed ? engine.seed : 'random'}`
                 : 'ACE-Step 未接続' }}
+            </template>
           </div>
           <div v-if="genPhase === 'running'" class="gen-prog">
-            <div class="gen-prog-fill" :style="{ width: genPct + '%' }" />
+            <div
+              class="gen-prog-fill"
+              :class="{ 'gen-prog-waiting': genPct >= 98 }"
+              :style="{ width: genPct + '%' }"
+            />
           </div>
           <!-- エラー表示 -->
           <div v-if="genPhase === 'error' && genError" class="gen-error mono">
