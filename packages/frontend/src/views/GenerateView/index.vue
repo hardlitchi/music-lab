@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useAppStore } from '@/stores/app'
 import {
   DIT_MODELS, LM_MODELS, TASKS, STYLE_CHIPS, MOOD_CHIPS, INSTR_CHIPS,
@@ -13,34 +13,35 @@ import {
   IconSpark, IconDice, IconWand, IconRefresh, IconSliders, IconPlus, IconWaveform, IconCopy
 } from '@/components/icons'
 import { fmtTime, hue } from '@/utils'
+import { useGenerate } from '@/composables/useGenerate'
 import type { TaskId, DitModelId, LmModelId, Take } from '@/types'
 
 const store = useAppStore()
 
-const task = ref<TaskId>(store.seedForm?.task ?? 'text2music')
+const task    = ref<TaskId>(store.seedForm?.task ?? 'text2music')
 const caption = ref(store.seedForm?.caption ?? CAPTION_PRESETS[0])
-const lyrics = ref(store.seedForm?.lyrics ?? SAMPLE_LYRICS)
+const lyrics  = ref(store.seedForm?.lyrics  ?? SAMPLE_LYRICS)
 const thinking = ref(true)
-const meta = ref({ bpm: 112, duration: 210, key: 'F# Minor', timesig: '4/4', lang: '日本語' })
-const engine = ref({
+const meta    = ref({ bpm: 112, duration: 210, key: 'F# Minor', timesig: '4/4', lang: '日本語' })
+const engine  = ref({
   dit: 'xl-turbo' as DitModelId,
-  lm: '1.7B' as LmModelId,
+  lm:  '1.7B'    as LmModelId,
   batch: 4,
   seed: '84412',
   lockSeed: false,
-  autogen: false,
-  steps: 8,
-  cfg: 7.0,
+  autogen:  false,
+  steps: 60,
+  cfg:   7.0,
   shift: 3.0,
-  temp: 0.85,
+  temp:  0.85,
   infer: 'ode' as 'ode' | 'sde',
 })
-const showAdv = ref(false)
-const lyricsPalette = ref<'struct' | 'vocal' | 'energy'>('struct')
-const lyricsRef = ref<HTMLTextAreaElement | null>(null)
+const showAdv        = ref(false)
+const lyricsPalette  = ref<'struct' | 'vocal' | 'energy'>('struct')
+const lyricsRef      = ref<HTMLTextAreaElement | null>(null)
 
-const taskObj = computed(() => TASKS.find(t => t.id === task.value))
-const ditModel = computed(() => DIT_MODELS.find(m => m.id === engine.value.dit))
+const taskObj    = computed(() => TASKS.find(t => t.id === task.value))
+const ditModel   = computed(() => DIT_MODELS.find(m => m.id === engine.value.dit))
 const availableDit = computed(() => taskObj.value?.base
   ? DIT_MODELS.filter(m => (m.tasks as string[]).includes(task.value))
   : DIT_MODELS
@@ -55,62 +56,46 @@ const lyricsLineCount = computed(() =>
 )
 const estTime = computed(() => {
   const d = DIT_MODELS.find(m => m.id === engine.value.dit)
-  const base = (d ? d.steps : 8) * (d?.xl ? 0.9 : 0.5) + (thinking.value ? 1.6 : 0) + (engine.value.lm === '4B' ? 1.2 : engine.value.lm === 'none' ? 0 : 0.5)
+  const base = (d ? d.steps : 60) * (d?.xl ? 0.9 : 0.5) + (thinking.value ? 1.6 : 0) + (engine.value.lm === '4B' ? 1.2 : engine.value.lm === 'none' ? 0 : 0.5)
   return (base * engine.value.batch * 0.35).toFixed(1)
 })
 
-const genPhase = ref<'idle' | 'running' | 'done'>('idle')
-const genPct = ref(0)
-const genStage = ref('')
+// ── 生成 ──
 const takes = ref<Take[]>([])
-const batchNo = ref(0)
-let genTimer: ReturnType<typeof setInterval> | null = null
+const { genPhase, genPct, genStage, genError, generate, stop } = useGenerate()
+onUnmounted(stop)
 
-function buildTake(i: number, batch: number): Take {
-  const seed = engine.value.lockSeed ? +engine.value.seed : Math.floor(10000 + Math.random() * 89999)
-  const jitterBpm = thinking.value ? meta.value.bpm + Math.round((Math.random() - 0.5) * 6) : meta.value.bpm
-  const color = caption.value.includes('rock') ? 18 : caption.value.includes('lo-fi') ? 195 : caption.value.includes('synth') ? 280 : 36
-  return {
-    id: 'take_' + Date.now() + '_' + i, idx: i, batch,
-    caption: caption.value, lyrics: lyrics.value, task: task.value,
-    bpm: jitterBpm, key: meta.value.key, timesig: meta.value.timesig, lang: meta.value.lang,
-    duration: meta.value.duration + Math.round((Math.random() - 0.5) * 8),
-    dit: engine.value.dit, lm: engine.value.lm, seed,
-    cfg: ditModel.value?.cfg ? engine.value.cfg : null,
-    steps: engine.value.steps, wave: seed % 50 + i, color,
-    scores: {
-      lyrics: meta.value.lang === 'Instrumental' ? null : Math.min(0.99, 0.7 + Math.random() * 0.28),
-      quality: 0.7 + Math.random() * 0.27,
-      diversity: 0.5 + Math.random() * 0.45,
-    },
-    saved: false,
+// ACE-Step 接続状態
+const aceStepConnected = ref<boolean | null>(null)
+async function checkAceStep() {
+  try {
+    const r = await fetch('/api/acestep/health')
+    aceStepConnected.value = r.ok && (await r.json()).connected
+  } catch {
+    aceStepConnected.value = false
   }
 }
+onMounted(checkAceStep)
 
-function runBatch(append: boolean) {
-  if (genTimer) clearInterval(genTimer)
-  const stages: [string, number][] = thinking.value
-    ? [['LM 計画中 — メタデータ推論', 18], ['LM — Caption 拡張', 30], ['セマンティックコード生成', 46], ['DiT 拡散 — ノイズ除去', 86], ['VAE デコード', 96], ['自動スコアリング', 100]]
-    : [['セマンティックコード', 24], ['DiT 拡散 — ノイズ除去', 84], ['VAE デコード', 96], ['自動スコアリング', 100]]
-  genPhase.value = 'running'; genPct.value = 0; genStage.value = stages[0][0]
-  let p = 0, si = 0
-  genTimer = setInterval(() => {
-    p += 1.6 + Math.random() * 2.4
-    while (si < stages.length - 1 && p >= stages[si][1]) si++
-    if (p >= 100) {
-      clearInterval(genTimer!); genTimer = null
-      const bn = ++batchNo.value
-      const fresh = Array.from({ length: engine.value.batch }, (_, i) => buildTake(i, bn))
-      takes.value = append ? [...fresh, ...takes.value] : fresh
-      genPhase.value = 'done'; genPct.value = 100; genStage.value = ''
-      if (engine.value.autogen) setTimeout(() => runBatch(true), 1400)
-    } else {
-      genPhase.value = 'running'; genPct.value = p; genStage.value = stages[si][0]
-    }
-  }, 110)
+async function runBatch(append: boolean) {
+  if (genPhase.value === 'running') return
+  try {
+    const newTakes = await generate({
+      caption: caption.value,
+      lyrics:  lyrics.value,
+      task:    task.value,
+      meta:    meta.value,
+      engine:  engine.value,
+      thinking: thinking.value,
+    })
+    takes.value = append ? [...newTakes, ...takes.value] : newTakes
+    aceStepConnected.value = true
+    if (engine.value.autogen) setTimeout(() => runBatch(true), 1400)
+  } catch (err: any) {
+    aceStepConnected.value = false
+    console.error('[generate]', err)
+  }
 }
-
-onUnmounted(() => { if (genTimer) clearInterval(genTimer) })
 
 watch(() => taskObj.value?.base, (base) => {
   if (base && ditModel.value && !(ditModel.value.tasks as string[]).includes(task.value)) {
@@ -130,18 +115,15 @@ function insertTag(tag: string) {
     el?.setSelectionRange(p, p)
   })
 }
-
 function appendChip(c: string) {
   caption.value = (caption.value.trim() ? caption.value.trim().replace(/[,，]\s*$/, '') + ', ' : '') + c
 }
-
 function formatCaption() {
   if (!caption.value.trim()) return
   const add = ', warm analog texture, wide stereo image, polished mix, dynamic build'
   if (!caption.value.includes('warm analog texture'))
     caption.value = caption.value.trim().replace(/[,，]\s*$/, '') + add
 }
-
 function saveTake(take: Take) {
   takes.value = takes.value.map(t => t.id === take.id ? { ...t, saved: true } : t)
   store.saveTake(take)
@@ -150,6 +132,7 @@ function saveTake(take: Take) {
 
 <template>
   <div class="view gen-view">
+    <!-- remix banner -->
     <div v-if="store.seedForm?.from" class="remix-banner">
       <IconCopy :size="15" />
       <span v-if="store.seedForm.region">
@@ -161,6 +144,23 @@ function saveTake(take: Take) {
       <span class="mono rb-tag">派生</span>
     </div>
 
+    <!-- ACE-Step 未接続の警告 -->
+    <div v-if="aceStepConnected === false" class="ace-warning">
+      <span class="ace-warning-icon">⚠</span>
+      <div>
+        <strong>ACE-Step サーバーが未接続です</strong>
+        <span class="ace-warning-sub">
+          生成を行うには ACE-Step を起動してください:
+          <code>python infer-api.py</code>
+        </span>
+      </div>
+      <button class="btn btn-outline btn-sm" @click="checkAceStep">再確認</button>
+    </div>
+    <div v-else-if="aceStepConnected === true" class="ace-ok">
+      <span class="live-dot" />ACE-Step 接続済
+    </div>
+
+    <!-- task bar -->
     <div class="taskbar">
       <button
         v-for="t in TASKS" :key="t.id"
@@ -174,18 +174,20 @@ function saveTake(take: Take) {
       </button>
     </div>
 
-    <div class="gen-grid">
-      <div class="gen-creative">
-        <div v-if="taskObj && taskObj.id !== 'text2music'" class="ref-strip">
-          <IconWaveform :size="18" />
-          <div>
-            <div class="ref-title">{{ taskObj.name }} — 参照オーディオ</div>
-            <div class="ref-sub">{{ taskObj.note }}</div>
-          </div>
-          <button class="btn btn-outline btn-sm"><IconPlus :size="14" />音源を選択</button>
-        </div>
+    <!-- cover/repaint/etc では参照オーディオが必要な旨を表示 -->
+    <div v-if="taskObj && taskObj.id !== 'text2music'" class="ref-strip">
+      <IconWaveform :size="18" />
+      <div>
+        <div class="ref-title">{{ taskObj.name }} — 参照オーディオ</div>
+        <div class="ref-sub">{{ taskObj.note }}</div>
+      </div>
+      <button class="btn btn-outline btn-sm"><IconPlus :size="14" />音源を選択</button>
+    </div>
 
-        <!-- caption panel -->
+    <div class="gen-grid">
+      <!-- creative column -->
+      <div class="gen-creative">
+        <!-- caption -->
         <div class="panel">
           <Field label="Caption" hint="スタイル・感情・楽器・音色・ボーカル — 生成に最も影響する入力">
             <template #right>
@@ -200,24 +202,15 @@ function saveTake(take: Take) {
             </template>
             <textarea v-model="caption" class="input textarea cap" :rows="3" placeholder="例: female vocal, dreamy city pop…" />
           </Field>
-          <div class="chiprow">
-            <span class="chiprow-label mono">STYLE</span>
-            <div class="chiprow-chips"><button v-for="c in STYLE_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div>
-          </div>
-          <div class="chiprow">
-            <span class="chiprow-label mono">MOOD</span>
-            <div class="chiprow-chips"><button v-for="c in MOOD_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div>
-          </div>
-          <div class="chiprow">
-            <span class="chiprow-label mono">INSTR</span>
-            <div class="chiprow-chips"><button v-for="c in INSTR_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div>
-          </div>
+          <div class="chiprow"><span class="chiprow-label mono">STYLE</span><div class="chiprow-chips"><button v-for="c in STYLE_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div></div>
+          <div class="chiprow"><span class="chiprow-label mono">MOOD</span><div class="chiprow-chips"><button v-for="c in MOOD_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div></div>
+          <div class="chiprow"><span class="chiprow-label mono">INSTR</span><div class="chiprow-chips"><button v-for="c in INSTR_CHIPS" :key="c" class="chip" @click="appendChip(c)">{{ c }}</button></div></div>
           <div v-if="thinking" class="cot-note">
             <IconSpark :size="14" />Thinking モード: LM が Caption を CoT で補完・拡張します
           </div>
         </div>
 
-        <!-- lyrics panel -->
+        <!-- lyrics -->
         <div class="panel">
           <Field label="Lyrics" hint="時間的スクリプト — 構造タグ・ボーカル指示・エネルギー変化">
             <template #right>
@@ -226,11 +219,7 @@ function saveTake(take: Take) {
             <textarea ref="lyricsRef" v-model="lyrics" class="input textarea lyr mono" :rows="12" placeholder="[Verse 1]&#10;歌詞…" />
           </Field>
           <div class="lyr-tagbar">
-            <Segmented
-              v-model="lyricsPalette"
-              size="sm"
-              :options="[{value:'struct',label:'構造'},{value:'vocal',label:'ボーカル'},{value:'energy',label:'エネルギー'}]"
-            />
+            <Segmented v-model="lyricsPalette" size="sm" :options="[{value:'struct',label:'構造'},{value:'vocal',label:'ボーカル'},{value:'energy',label:'エネルギー'}]" />
             <span class="mono lyr-count">{{ lyricsLineCount }} 行</span>
           </div>
           <div class="tag-grid">
@@ -241,7 +230,7 @@ function saveTake(take: Take) {
 
       <!-- engine rail -->
       <div class="gen-rail">
-        <!-- meta panel -->
+        <!-- meta -->
         <div class="panel">
           <div class="panel-title">
             <span>メタデータ</span>
@@ -279,7 +268,7 @@ function saveTake(take: Take) {
           </div>
         </div>
 
-        <!-- model panel -->
+        <!-- model -->
         <div class="panel">
           <div class="panel-title">
             <span>エンジン</span>
@@ -287,19 +276,15 @@ function saveTake(take: Take) {
           </div>
           <Field label="DiT — 実行者" :hint="ditModel?.note">
             <div class="model-grid">
-              <button
-                v-for="m in availableDit" :key="m.id"
+              <button v-for="m in availableDit" :key="m.id"
                 :class="['model-card', engine.dit === m.id && 'is-on']"
-                @click="engine.dit = m.id as DitModelId"
-              >
+                @click="engine.dit = m.id as DitModelId">
                 <div class="mc-top">
                   <span class="mc-name mono">{{ m.label }}</span>
                   <span v-if="m.xl" class="mc-xl mono">XL</span>
                 </div>
                 <div class="mc-meta mono">{{ m.steps }}st · {{ m.cfg ? 'CFG' : 'no-CFG' }}</div>
-                <div class="mc-speed">
-                  <span v-for="i in 4" :key="i" :class="['spd', i <= m.speed && 'on']" />
-                </div>
+                <div class="mc-speed"><span v-for="i in 4" :key="i" :class="['spd', i <= m.speed && 'on']" /></div>
               </button>
             </div>
           </Field>
@@ -308,12 +293,8 @@ function saveTake(take: Take) {
           </Field>
           <div class="row2">
             <Field label="バッチ" hint="同時生成数">
-              <Segmented
-                :model-value="String(engine.batch)"
-                size="sm"
-                :options="['1','2','4','8']"
-                @update:model-value="(v) => engine.batch = +v"
-              />
+              <Segmented :model-value="String(engine.batch)" size="sm" :options="['1','2','4','8']"
+                @update:model-value="(v) => engine.batch = +v" />
             </Field>
             <Field label="Seed">
               <template #right>
@@ -321,10 +302,8 @@ function saveTake(take: Take) {
                   {{ engine.lockSeed ? '🔒' : '🎲' }}
                 </button>
               </template>
-              <input
-                v-model="engine.seed" class="input mono"
-                @input="(e: Event) => engine.seed = (e.target as HTMLInputElement).value.replace(/\D/g, '').slice(0,7)"
-              />
+              <input v-model="engine.seed" class="input mono"
+                @input="(e) => engine.seed = (e.target as HTMLInputElement).value.replace(/\D/g,'').slice(0,7)" />
             </Field>
           </div>
           <label class="autogen">
@@ -348,44 +327,51 @@ function saveTake(take: Take) {
               <template #right><span class="mono field-hint">{{ engine.cfg.toFixed(1) }}</span></template>
               <input v-model.number="engine.cfg" type="range" class="range" :min="1" :max="12" :step="0.5" />
             </Field>
-            <Field label="Shift">
+            <Field label="Shift (omega_scale)">
               <template #right><span class="mono field-hint">{{ engine.shift.toFixed(1) }}</span></template>
-              <input v-model.number="engine.shift" type="range" class="range" :min="1" :max="5" :step="0.5" />
-            </Field>
-            <Field label="LM temperature">
-              <template #right><span class="mono field-hint">{{ engine.temp.toFixed(2) }}</span></template>
-              <input v-model.number="engine.temp" type="range" class="range" :min="0" :max="1.5" :step="0.05" />
+              <input v-model.number="engine.shift" type="range" class="range" :min="1" :max="20" :step="0.5" />
             </Field>
             <Field label="推論方法">
-              <Segmented v-model="engine.infer" size="sm" :options="[{value:'ode',label:'ODE 決定論'},{value:'sde',label:'SDE 確率的'}]" />
+              <Segmented v-model="engine.infer" size="sm"
+                :options="[{value:'ode',label:'ODE (euler)'},{value:'sde',label:'SDE (pingpong)'}]" />
             </Field>
           </div>
         </div>
 
+        <!-- CTA -->
         <div class="gen-cta">
           <button class="gen-btn" :disabled="genPhase === 'running'" @click="runBatch(false)">
             <template v-if="genPhase === 'running'">
-              <span class="spinner" />{{ genStage }}
+              <span class="spinner" />{{ genStage || '生成中...' }}
             </template>
             <template v-else>
               <IconSpark :size="18" />生成 — {{ engine.batch }} take
             </template>
           </button>
           <div class="gen-est mono">
-            {{ genPhase === 'running' ? `${Math.round(genPct)}%` : `推定 ~${estTime}s · seed ${engine.lockSeed ? engine.seed : 'random'}` }}
+            {{ genPhase === 'running'
+              ? `${Math.round(genPct)}%`
+              : aceStepConnected
+                ? `推定 ~${estTime}s · seed ${engine.lockSeed ? engine.seed : 'random'}`
+                : 'ACE-Step 未接続' }}
           </div>
           <div v-if="genPhase === 'running'" class="gen-prog">
             <div class="gen-prog-fill" :style="{ width: genPct + '%' }" />
+          </div>
+          <!-- エラー表示 -->
+          <div v-if="genPhase === 'error' && genError" class="gen-error mono">
+            ⚠ {{ genError }}
           </div>
         </div>
       </div>
     </div>
 
+    <!-- results -->
     <div v-if="takes.length || genPhase === 'running'" class="results">
       <div class="results-head">
         <h3>生成結果</h3>
         <Badge v-if="engine.autogen" tone="accent"><IconRefresh :size="12" /> AutoGen 稼働中</Badge>
-        <span class="mono field-hint" style="margin-left:auto">{{ takes.length }} takes · DiT Lyrics Alignment で並べ替え可能</span>
+        <span class="mono field-hint" style="margin-left:auto">{{ takes.length }} takes</span>
       </div>
       <div class="take-list">
         <TakeCard
@@ -399,3 +385,26 @@ function saveTake(take: Take) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.ace-warning {
+  display: flex; align-items: center; gap: 12px;
+  background: color-mix(in oklch, oklch(0.7 0.16 25) 12%, transparent);
+  border: 1px solid color-mix(in oklch, oklch(0.7 0.16 25) 40%, transparent);
+  border-radius: var(--r-sm); padding: 12px 16px; margin-bottom: var(--gap);
+  font-size: 13px;
+}
+.ace-warning-icon { font-size: 20px; flex-shrink: 0; }
+.ace-warning-sub  { display: block; font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.ace-warning-sub code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-family: var(--mono); }
+.ace-ok {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11.5px; color: var(--ok); margin-bottom: var(--gap);
+}
+.gen-error {
+  font-size: 11px; color: oklch(0.75 0.16 25);
+  background: color-mix(in oklch, oklch(0.7 0.16 25) 10%, transparent);
+  border-radius: 6px; padding: 8px 10px; line-height: 1.5;
+  white-space: pre-line;
+}
+</style>

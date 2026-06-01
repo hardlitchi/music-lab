@@ -14,11 +14,12 @@ const accent = ref('oklch(0.79 0.135 65)')
 const uiFont = ref('Space Grotesk')
 const density = ref<'compact' | 'regular' | 'comfy'>('regular')
 
-// player progress animation
+// player progress animation — 実音声の場合は HTMLAudioElement 側で進捗管理するためスキップ
 let raf: number | null = null
 watch(() => store.playing, (p) => {
   if (raf) { cancelAnimationFrame(raf); raf = null }
-  if (p && store.nowPlaying) {
+  const hasRealAudio = !!(store.nowPlaying as any)?.audioUrl
+  if (p && store.nowPlaying && !hasRealAudio) {
     let last = performance.now()
     const tick = (t: number) => {
       store.progress += (t - last) / (store.nowPlaying!.duration * 1000)

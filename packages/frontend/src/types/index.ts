@@ -89,6 +89,21 @@ export interface Take {
   color: number
   scores: TrackScores
   saved: boolean
+  // 実生成時のみセット
+  audioUrl?: string       // /audio/:filename (サーバー経由)
+  jobId?: string          // 生成ジョブID
+}
+
+// サーバーから返るジョブ状態
+export type JobStatus = 'queued' | 'processing' | 'completed' | 'failed'
+
+export interface GenerateJob {
+  id: string
+  status: JobStatus
+  progress: number
+  stage: string
+  takes: { idx: number; seed: number; audioUrl: string; durationSec: number }[]
+  error: string | null
 }
 
 export interface Integration {

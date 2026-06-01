@@ -24,6 +24,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ''),
         },
+        '/audio': {
+          target: `http://localhost:${serverPort}`,
+          changeOrigin: true,
+        },
       },
     },
   }
