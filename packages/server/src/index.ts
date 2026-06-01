@@ -224,6 +224,7 @@ interface AceStepResult {
 
 // ── Express アプリ ──
 const app = express()
+app.set('etag', false)   // ETag 無効化: ポーリング時に 304 Not Modified が返らないようにする
 app.use(cors({ origin: CORS_ORIGIN }))
 app.use(express.json({ limit: '10mb' }))
 
@@ -267,6 +268,8 @@ app.post('/generate', (req, res) => {
 
 // ジョブ状態ポーリング
 app.get('/generate/:jobId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+  res.setHeader('Pragma', 'no-cache')
   const job = jobs.get(req.params.jobId)
   if (!job) { res.status(404).json({ error: 'job not found' }); return }
   res.json(job)
