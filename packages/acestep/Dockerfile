@@ -23,17 +23,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PyTorch のインデックス URL (CPU or CUDA)
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
-# PyTorch を先にインストール (キャッシュ効率のため分離)
+# Step 1: PyTorch ファミリーを同一インデックスからインストール
+# torch / torchaudio / torchvision は必ず同じ URL から取得すること
+# (異なる URL から混在すると torchvision::nms の演算子不一致が発生する)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        torch torchaudio \
+        torch torchaudio torchvision \
         --index-url "$TORCH_INDEX_URL"
 
-# hf_transfer (モデルダウンロード高速化) + FastAPI + ACE-Step
+# Step 2: ACE-Step と残りの依存パッケージをインストール
+# --extra-index-url で torch 系が既存バージョンを維持できるようにする
 RUN pip install --no-cache-dir \
     hf_transfer "fastapi>=0.115" "uvicorn[standard]>=0.30" && \
     pip install --no-cache-dir \
-    "git+https://github.com/ace-step/ACE-Step.git"
+    "git+https://github.com/ace-step/ACE-Step.git" \
+    --extra-index-url "$TORCH_INDEX_URL"
 
 # 非 root ユーザー
 RUN useradd -m -u 1001 appuser
