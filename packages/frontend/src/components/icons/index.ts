@@ -34,6 +34,28 @@ export const IconLibrary: FunctionalComponent<IconProps> = (props) =>
     path('M18.5 5.5l2.2 14.3'),
   ])
 
+export const IconPiano: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    rect(3, 5, 18, 14, 2),
+    path('M8 5v9M12 5v9M16 5v9M7 14h2M11 14h2M15 14h2'),
+    path('M9 14v5M15 14v5'),
+  ])
+
+export const IconRadio: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    rect(3, 8, 18, 12, 2),
+    path('M7 8l9-5'),
+    circle(8.5, 14, 2.5),
+    path('M14 12h4M14 16h4'),
+  ])
+
+export const IconMusic: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M9 18V5l12-2v13'),
+    circle(6, 18, 3),
+    circle(18, 16, 3),
+  ])
+
 export const IconShare: FunctionalComponent<IconProps> = (props) =>
   S(props, [
     circle(6, 12, 2.4),
@@ -58,6 +80,13 @@ export const IconPause: FunctionalComponent<IconProps> = (props) =>
     rect(7, 5.5, 3.4, 13, 1),
     rect(13.6, 5.5, 3.4, 13, 1),
   ])
+
+export const IconSquare: FunctionalComponent<IconProps> = (props) =>
+  h('svg', {
+    width: props.size ?? 18, height: props.size ?? 18,
+    viewBox: '0 0 24 24', fill: 'currentColor',
+    stroke: 'none', style: props.style, class: props.class,
+  }, [rect(5.5, 5.5, 13, 13, 2)])
 
 export const IconDice: FunctionalComponent<IconProps> = (props) =>
   S(props, [
@@ -87,6 +116,9 @@ export const IconDownload: FunctionalComponent<IconProps> = (props) =>
 
 export const IconPlus: FunctionalComponent<IconProps> = (props) =>
   S(props, [path('M12 5v14M5 12h14')])
+
+export const IconMinus: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M5 12h14')])
 
 export const IconSearch: FunctionalComponent<IconProps> = (props) =>
   S(props, [circle(11, 11, 6), path('M20 20l-4.5-4.5')])
@@ -157,3 +189,72 @@ export const IconTag: FunctionalComponent<IconProps> = (props) =>
     path('M3 11l8-8 9 1 1 9-8 8z'),
     circle(15, 9, 1.4),
   ])
+
+export const IconPencil: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z'),
+  ])
+
+export const IconTrash: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M3 6h18'),
+    path('M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2'),
+    path('M10 11v6M14 11v6'),
+  ])
+
+export const IconSave: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z'),
+    path('M17 21v-8H7v8M7 3v5h8'),
+  ])
+
+export const IconVolume: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M11 5L6 9H2v6h4l5 4V5z'),
+    path('M15.54 8.46a5 5 0 010 7.07M19.07 4.93a10 10 0 010 14.14'),
+  ])
+
+export const IconHeadphones: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M3 18v-6a9 9 0 0118 0v6'),
+    path('M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z'),
+  ])
+
+export const IconChevronLeft: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M15 18l-6-6 6-6')])
+
+export const IconChevronRight: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M9 18l6-6-6-6')])
+
+export const IconChevronUp: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M18 15l-6-6-6 6')])
+
+export const IconChevronDown: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M6 9l6 6 6-6')])
+
+export const IconGrip: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    circle(9, 6, 1, { fill: 'currentColor', stroke: 'none' }),
+    circle(15, 6, 1, { fill: 'currentColor', stroke: 'none' }),
+    circle(9, 12, 1, { fill: 'currentColor', stroke: 'none' }),
+    circle(15, 12, 1, { fill: 'currentColor', stroke: 'none' }),
+    circle(9, 18, 1, { fill: 'currentColor', stroke: 'none' }),
+    circle(15, 18, 1, { fill: 'currentColor', stroke: 'none' }),
+  ])
+
+export const IconRepeat: FunctionalComponent<IconProps> = (props) =>
+  S(props, [
+    path('M17 1l4 4-4 4'),
+    path('M3 11V9a4 4 0 014-4h14'),
+    path('M7 23l-4-4 4-4'),
+    path('M21 13v2a4 4 0 01-4 4H3'),
+  ])
+
+export const IconArrowRight: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M5 12h14M12 5l7 7-7 7')])
+
+export const IconZap: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M13 2L3 14h9l-1 8 10-12h-9l1-8z')])
+
+export const IconEraser: FunctionalComponent<IconProps> = (props) =>
+  S(props, [path('M20 20H7L3 16c-.8-.8-.8-2 0-2.8L13.6 2.6c.8-.8 2-.8 2.8 0L21.4 7.6c.8.8.8 2 0 2.8L12 20')])

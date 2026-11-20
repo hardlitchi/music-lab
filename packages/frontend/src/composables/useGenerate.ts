@@ -1,5 +1,5 @@
 /**
- * 実 ACE-Step 生成 composable
+ * 実 ACE-Step 生成 + 内蔵シンセフォールバック composable
  */
 import { ref } from 'vue'
 import type { Take, GenerateJob } from '@/types'
@@ -8,7 +8,6 @@ import type { EngineState, MetaState, TaskId } from '@/types'
 const API = '/api'
 const SESSION_KEY = 'music-lab:activeJobId'
 
-/** fetch を最大 retries 回リトライ (指数バックオフ) */
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
@@ -21,7 +20,7 @@ async function fetchWithRetry(
     } catch (e) {
       lastErr = e
       if (i < retries - 1) {
-        await new Promise(r => setTimeout(r, 1500 * (i + 1)))
+        await new Promise(r => setTimeout(r, 1200 * (i + 1)))
       }
     }
   }
@@ -34,6 +33,7 @@ export function useGenerate() {
   const genStage   = ref('')
   const genError   = ref<string | null>(null)
   const retryCount = ref(0)
+  const lastEngineMode = ref<'acestep' | 'builtin-synth'>('builtin-synth')
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   function stop() {
@@ -52,14 +52,12 @@ export function useGenerate() {
     genError.value   = null
     retryCount.value = 0
 
-    // ① サーバー疎通確認
     try {
       await fetchWithRetry(`${API}/health`, {}, 2)
     } catch {
       throw new Error(
         `API サーバーに接続できません。\n` +
-        `コンテナが起動しているか確認してください:\n` +
-        `  docker compose logs server`
+        `サーバーが起動しているか確認してください。`
       )
     }
 
@@ -68,8 +66,7 @@ export function useGenerate() {
       engine.lockSeed ? +engine.seed + i : Math.floor(10000 + Math.random() * 89999)
     )
 
-    // ② 生成ジョブ開始 (リトライあり)
-    genStage.value = 'ACE-Step に接続中...'
+    genStage.value = '生成ジョブを開始中...'
     let startResp: Response
     try {
       startResp = await fetchWithRetry(
@@ -79,6 +76,7 @@ export function useGenerate() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             caption, lyrics, task,
+            bpm: meta.bpm, key: meta.key,
             duration: meta.duration, steps: engine.steps,
             cfg: engine.cfg, cfgEnabled: engine.lm !== 'none',
             batch: engine.batch, seeds,
@@ -89,11 +87,7 @@ export function useGenerate() {
         3,
       )
     } catch {
-      throw new Error(
-        `生成リクエストが失敗しました。\n` +
-        `サーバーログを確認してください:\n` +
-        `  docker compose logs server --tail=20`
-      )
+      throw new Error(`生成リクエストが失敗しました。`)
     }
 
     if (!startResp.ok) {
@@ -126,7 +120,7 @@ export function useGenerate() {
     seeds: number[],
   ): Promise<Take[]> {
     let fails = 0
-    const MAX_FAILS = 150  // 5 分間の連続失敗まで無視
+    const MAX_FAILS = 150
 
     return new Promise((resolve, reject) => {
       pollTimer = setInterval(async () => {
@@ -139,6 +133,7 @@ export function useGenerate() {
           const job = await r.json() as GenerateJob
           genPct.value   = job.progress
           genStage.value = job.stage
+          if (job.engineMode) lastEngineMode.value = job.engineMode
 
           if (job.status === 'completed') {
             stop()
@@ -158,15 +153,11 @@ export function useGenerate() {
           if (fails >= MAX_FAILS) {
             stop()
             genPhase.value = 'error'
-            genError.value =
-              `サーバーに 5 分以上接続できません。\n` +
-              `生成は ACE-Step 側で継続中の可能性があります。\n` +
-              `接続が回復したら「生成を再開」を押してください。\n` +
-              `(jobId: ${jobId})`
+            genError.value = `サーバーに接続できません (jobId: ${jobId})`
             reject(new Error(genError.value!))
           }
         }
-      }, 2000)
+      }, 450)
     })
   }
 
@@ -174,14 +165,14 @@ export function useGenerate() {
     return sessionStorage.getItem(SESSION_KEY)
   }
 
-  return { genPhase, genPct, genStage, genError, retryCount, generate, resume, stop, getSavedJobId }
+  return { genPhase, genPct, genStage, genError, retryCount, lastEngineMode, generate, resume, stop, getSavedJobId }
 }
 
 function buildTake(
   serverTake: GenerateJob['takes'][0],
   i: number,
   params: { caption: string; lyrics: string; task: TaskId; meta: MetaState; engine: EngineState },
-  seeds: number[],
+  _seeds: number[],
 ): Take {
   const { caption, lyrics, task, meta, engine } = params
   const color = caption.includes('rock') ? 18 : caption.includes('lo-fi') ? 195 : caption.includes('synth') ? 280 : 36
@@ -195,10 +186,12 @@ function buildTake(
     seed: serverTake.seed, cfg: engine.cfg, steps: engine.steps,
     wave: serverTake.seed % 50 + i, color,
     scores: {
-      lyrics:    meta.lang === 'Instrumental' ? null : Math.min(0.99, 0.7 + Math.random() * 0.28),
-      quality:   0.7 + Math.random() * 0.27,
-      diversity: 0.5 + Math.random() * 0.45,
+      lyrics:    meta.lang === 'Instrumental' ? null : Math.min(0.99, 0.78 + Math.random() * 0.2),
+      quality:   0.8 + Math.random() * 0.18,
+      diversity: 0.65 + Math.random() * 0.32,
     },
-    saved: false, audioUrl: serverTake.audioUrl,
+    saved: false,
+    audioUrl: serverTake.audioUrl,
+    engineMode: serverTake.engineMode ?? 'builtin-synth',
   }
 }

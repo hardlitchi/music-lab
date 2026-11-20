@@ -106,6 +106,10 @@ const scoreBars = computed(() => track.value ? [
 const exportFmt = ref('wav')
 const exportLrc = ref(true)
 const exportEmbedMeta = ref(true)
+const radioAssetType = ref<'BGM' | 'THEME' | 'JINGLE' | 'SFX' | 'STINGER'>('BGM')
+const radioRole = ref('TALK_BGM')
+const radioSending = ref(false)
+const radioSentMsg = ref<string | null>(null)
 
 const metaJson = computed(() => {
   if (!track.value) return ''
@@ -115,9 +119,114 @@ const metaJson = computed(() => {
     vocal_language: track.value.lang, duration_sec: track.value.duration,
     model: { dit: track.value.dit, lm: track.value.lm }, seed: track.value.seed,
     steps: track.value.steps, cfg: track.value.cfg, tags: track.value.tags,
-    scores: track.value.scores, generator: 'ACE-Step 1.5',
+    scores: track.value.scores, source: track.value.source ?? 'acestep',
+    audioUrl: track.value.audioUrl,
   }, null, 2)
 })
+
+function triggerDownload(url: string, filename: string) {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+function downloadBlob(content: string, mime: string, filename: string) {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  triggerDownload(url, filename)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function buildLrcContent(t: Track): string {
+  const lines = (t.lyrics || '').split('\n').filter(l => l.trim())
+  const step = Math.max(2, Math.floor((t.duration || 20) / Math.max(1, lines.length)))
+  return lines.map((line, i) => {
+    const sec = i * step
+    const m = String(Math.floor(sec / 60)).padStart(2, '0')
+    const s = String(sec % 60).padStart(2, '0')
+    return `[${m}:${s}.00] ${line}`
+  }).join('\n')
+}
+
+async function handleExportDownload() {
+  if (!track.value) return
+  const safeName = track.value.title.replace(/[^a-zA-Z0-9_\-\u3040-\u30ff\u4e00-\u9faf]/g, '_') || 'track'
+  if (exportFmt.value === 'wav') {
+    if (track.value.audioUrl) {
+      triggerDownload(track.value.audioUrl, `${safeName}.wav`)
+      store.flash(`${safeName}.wav をダウンロードしました`)
+    } else {
+      store.flash('このトラックには実音声ファイルがありません')
+    }
+    if (exportLrc.value && track.value.lyrics) {
+      downloadBlob(buildLrcContent(track.value), 'text/plain;charset=utf-8', `${safeName}.lrc`)
+    }
+  } else if (exportFmt.value === 'lrc') {
+    downloadBlob(buildLrcContent(track.value), 'text/plain;charset=utf-8', `${safeName}.lrc`)
+    store.flash(`${safeName}.lrc を書き出しました`)
+  } else {
+    downloadBlob(metaJson.value, 'application/json;charset=utf-8', `${safeName}.json`)
+    store.flash(`${safeName}.json を書き出しました`)
+  }
+}
+
+async function copyMetaJson() {
+  if (!metaJson.value) return
+  await navigator.clipboard.writeText(metaJson.value)
+  store.flash('メタデータ JSON をクリップボードにコピーしました')
+}
+
+async function copyShareUrl() {
+  if (!track.value) return
+  const url = `${window.location.origin}/?track=${track.value.id}`
+  await navigator.clipboard.writeText(url)
+  store.flash('共有リンクをコピーしました')
+}
+
+async function sendToRadio() {
+  if (!track.value || radioSending.value) return
+  radioSending.value = true
+  radioSentMsg.value = null
+  try {
+    const resp = await fetch('/api/integrations/radio/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        trackId: track.value.id,
+        assetType: radioAssetType.value,
+        role: radioRole.value,
+        name: track.value.title,
+        prompt: track.value.caption,
+        tags: track.value.tags,
+        durationSecs: track.value.duration,
+      }),
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = await resp.json()
+    radioSentMsg.value = data.mode === 'live-api'
+      ? `📻 AI Radio 放送局 (${radioRole.value}) にライブ登録しました！`
+      : `📻 AI Radio 共有アセットライブラリ (${radioRole.value}) に保存しました！`
+    store.flash(radioSentMsg.value)
+  } catch (e: any) {
+    store.flash(`Radio 送信エラー: ${e?.message ?? e}`)
+  } finally {
+    radioSending.value = false
+  }
+}
+
+function handleIntegrationAction(id: string) {
+  if (id === 'radio') {
+    void sendToRadio()
+  } else if (id === 'studio') {
+    store.setView('studio')
+    store.flash('MIDI Studio に移動しました')
+  } else {
+    void copyMetaJson()
+  }
+}
 
 // tag editor
 const tagInput = ref('')
@@ -523,19 +632,49 @@ function doRepaint() {
                 <span class="opt-label">メタデータをファイルに埋め込む</span>
               </label>
             </div>
-            <button class="btn btn-accent btn-full">
+            <button class="btn btn-accent btn-full" @click="handleExportDownload">
               <IconDownload :size="16" />{{ exportFmt.toUpperCase() }} を書き出す
             </button>
           </div>
           <div class="panel">
             <div class="panel-title">
               <span>メタデータ JSON</span>
-              <button class="btn btn-ghost btn-sm"><IconCopy :size="13" />コピー</button>
+              <button class="btn btn-ghost btn-sm" @click="copyMetaJson"><IconCopy :size="13" />コピー</button>
             </div>
             <pre class="json-block mono">{{ metaJson }}</pre>
           </div>
         </div>
         <div class="dcol">
+          <div class="panel">
+            <div class="panel-title">📻 AI Radio Station へ送出 (radio 連携)</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px">
+              <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted)">
+                アセット種別
+                <select v-model="radioAssetType" class="input" style="padding: 6px 8px">
+                  <option value="BGM">BGM</option>
+                  <option value="THEME">THEME (番組テーマ)</option>
+                  <option value="JINGLE">JINGLE (ジングル)</option>
+                  <option value="STINGER">STINGER</option>
+                  <option value="SFX">SFX</option>
+                </select>
+              </label>
+              <label style="display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted)">
+                放送ロール
+                <select v-model="radioRole" class="input" style="padding: 6px 8px">
+                  <option value="TALK_BGM">TALK_BGM</option>
+                  <option value="OPENING_THEME">OPENING_THEME</option>
+                  <option value="CLOSING_THEME">CLOSING_THEME</option>
+                  <option value="NEWS_BGM">NEWS_BGM</option>
+                  <option value="WEATHER_BGM">WEATHER_BGM</option>
+                  <option value="JINGLE_STINGER">JINGLE_STINGER</option>
+                </select>
+              </label>
+            </div>
+            <button class="btn btn-accent btn-full" :disabled="radioSending" @click="sendToRadio">
+              <IconExternal :size="15" />{{ radioSending ? '送信中...' : 'AI Radio 音源ライブラリへ送信' }}
+            </button>
+            <p v-if="radioSentMsg" style="margin-top: 8px; font-size: 12px; color: var(--ok)">{{ radioSentMsg }}</p>
+          </div>
           <div class="panel">
             <div class="panel-title">外部サービス連携</div>
             <div class="integ-list">
@@ -548,20 +687,19 @@ function doRepaint() {
                   </div>
                   <span class="integ-desc">{{ it.desc }}</span>
                 </div>
-                <button v-if="it.status === 'connected'" class="btn btn-outline btn-sm">
-                  <IconExternal :size="13" />送信
+                <button class="btn btn-outline btn-sm" @click="handleIntegrationAction(it.id)">
+                  <IconExternal :size="13" />{{ it.id === 'radio' ? '送信' : it.id === 'studio' ? '開く' : '書き出し' }}
                 </button>
-                <button v-else class="btn btn-ghost btn-sm">接続</button>
               </div>
             </div>
           </div>
           <div class="panel">
             <div class="panel-title">共有リンク</div>
             <div class="sharebox">
-              <span class="mono share-url">acemusic.ai/s/{{ track.id.slice(4) }}</span>
-              <button class="btn btn-outline btn-sm"><IconCopy :size="13" />コピー</button>
+              <span class="mono share-url">music-lab/track/{{ track.id }}</span>
+              <button class="btn btn-outline btn-sm" @click="copyShareUrl"><IconCopy :size="13" />コピー</button>
             </div>
-            <p class="muted-note">リンクには再生プレイヤーと、許可した場合はメタデータが含まれます。</p>
+            <p class="muted-note">リンクには再生プレイヤーとメタデータが含まれます。</p>
           </div>
         </div>
       </div>
