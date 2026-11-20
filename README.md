@@ -1,6 +1,6 @@
-# 楽曲工房
+# 楽曲工房 Studio (Music Lab × MIDI Studio)
 
-ACE-Step 1.5 を使った楽曲生成・管理・外部連携 Web アプリ
+ACE-Step 1.5 を使った AI 楽曲生成・管理と、Web Audio API ベースのブラウザ DAW（MIDI Studio）、AI Radio Station 連携を統合した Web アプリケーションです。
 
 ![ACE-Step](https://img.shields.io/badge/ACE--Step-1.5-orange) ![Vue 3](https://img.shields.io/badge/Vue-3-42b883) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
 
@@ -8,9 +8,10 @@ ACE-Step 1.5 を使った楽曲生成・管理・外部連携 Web アプリ
 
 | 画面 | 内容 |
 |------|------|
-| **工房（生成）** | Caption / Lyrics / メタデータ / エンジン設定で楽曲を生成 |
-| **ライブラリ** | グリッド / リスト表示・タグ絞り込み・ソートでトラック管理 |
-| **トラック詳細** | メタデータ編集・スコア表示・系譜・Repaint 区間選択・エクスポート・外部連携 |
+| **AI 楽曲工房** | Caption / Lyrics / メタデータ / エンジン設定で楽曲を生成（ACE-Step 未起動時は内蔵シンセエンジンで自動生成） |
+| **MIDI Studio** | 8パートドラム＋ポリシンセのステップシーケンサー＆ループマトリクス。`.mid` / `.wav` 書き出し、Web MIDI 入力、ライブラリ保存、AI工房連携に対応 |
+| **ライブラリ** | グリッド / リスト表示・タグ絞り込み・ソートでトラック管理（`data/tracks.json` に永続化） |
+| **トラック詳細** | メタデータ編集・スコア表示・系譜・Repaint 区間選択・`.WAV`/`.LRC`/`.JSON` 書き出し・**AI Radio Station (`radio`) への送出** |
 | **プレイヤーバー** | 常駐プレイヤー（波形シーク・実音声再生対応） |
 
 ## 技術スタック
@@ -48,17 +49,29 @@ cp .env.example .env
 # ポートを環境に合わせて調整してください
 ```
 
-### A. ローカル開発（Docker なし）
+### A. ローカル開発（Docker なし・推奨）
+
+ACE-Step 推論サーバーなしでも、内蔵マルチトラック・シンセサイザーおよび MIDI Studio の Web Audio エンジンだけで即座に起動・実音声生成できます。
 
 ```bash
-# 1. ACE-Step 推論サーバーを起動 (GPU 環境で)
+# 依存関係インストール（初回のみ）
+npm install
+
+# フロントエンド + API サーバーを同時起動
+npm run dev
+# → フロントエンド: http://localhost:5200
+# → API サーバー:   http://localhost:4001
+```
+
+ACE-Step 実機推論サーバーを併用する場合（GPU 環境）：
+
+```bash
+# 1. ACE-Step 推論サーバーを起動
 pip install "git+https://github.com/ace-step/ACE-Step.git" fastapi "uvicorn[standard]"
 python packages/acestep/infer_server.py  # → http://localhost:8000
 
 # 2. アプリを起動
 bash scripts/start.sh
-# → フロントエンド: http://localhost:5200
-# → API サーバー:   http://localhost:4001
 ```
 
 ### B. Docker — ベース構成（ACE-Step 外部起動）

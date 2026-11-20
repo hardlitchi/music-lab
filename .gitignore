@@ -28,5 +28,7 @@ Thumbs.db
 screenshot-*.png
 .playwright-mcp/
 
-# Docker volumes
+# Docker volumes & runtime data
 .docker/
+data/
+output/

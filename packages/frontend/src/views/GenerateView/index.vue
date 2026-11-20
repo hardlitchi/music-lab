@@ -22,7 +22,13 @@ const task    = ref<TaskId>(store.seedForm?.task ?? 'text2music')
 const caption = ref(store.seedForm?.caption ?? CAPTION_PRESETS[0])
 const lyrics  = ref(store.seedForm?.lyrics  ?? SAMPLE_LYRICS)
 const thinking = ref(true)
-const meta    = ref({ bpm: 112, duration: 210, key: 'F# Minor', timesig: '4/4', lang: '日本語' })
+const meta    = ref({
+  bpm: store.seedForm?.bpm ?? 112,
+  duration: store.seedForm?.duration ?? 24,
+  key: store.seedForm?.key ?? 'F# Minor',
+  timesig: '4/4',
+  lang: '日本語',
+})
 const engine  = ref({
   dit: 'xl-turbo' as DitModelId,
   lm:  '1.7B'    as LmModelId,
@@ -162,17 +168,11 @@ async function resumeJob() {
       <span class="mono rb-tag">派生</span>
     </div>
 
-    <!-- ACE-Step 未接続の警告 -->
-    <div v-if="aceStepConnected === false" class="ace-warning">
-      <span class="ace-warning-icon">⚠</span>
-      <div>
-        <strong>ACE-Step サーバーが未接続です</strong>
-        <span class="ace-warning-sub">
-          生成を行うには ACE-Step を起動してください:
-          <code>python infer-api.py</code>
-        </span>
-      </div>
-      <button class="btn btn-outline btn-sm" @click="checkAceStep">再確認</button>
+    <!-- エンジン接続状態 -->
+    <div v-if="aceStepConnected === false" class="ace-ok">
+      <span class="live-dot" style="background: #ffe066; box-shadow: 0 0 8px #ffe066" />
+      内蔵シンセエンジン稼働中（ACE-Step 未起動時は自動で実音声 WAV を生成します）
+      <button class="btn btn-ghost btn-sm" style="margin-left: auto" @click="checkAceStep">ACE-Step 再確認</button>
     </div>
     <div v-else-if="aceStepConnected === true" class="ace-ok">
       <span class="live-dot" />ACE-Step 接続済
@@ -379,7 +379,7 @@ async function resumeJob() {
             <template v-else>
               {{ aceStepConnected
                 ? `推定 ~${estTime}s · seed ${engine.lockSeed ? engine.seed : 'random'}`
-                : 'ACE-Step 未接続' }}
+                : `内蔵シンセモード · seed ${engine.lockSeed ? engine.seed : 'random'}` }}
             </template>
           </div>
           <div v-if="genPhase === 'running'" class="gen-prog">

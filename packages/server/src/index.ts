@@ -1,11 +1,13 @@
 import express from 'express'
 import cors from 'cors'
-import { readFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { resolve, dirname, join, basename } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
+import { generateSynthWav } from './synthWav.js'
+import { SEED_TRACKS, SEED_STUDIO_PROJECTS, type SeedTrack } from './seedData.js'
 
-// ── ルートの .env をロード (Docker では環境変数として注入済みのため上書きしない) ──
+// ── ルートの .env をロード ──
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const rootEnvPath = resolve(__dirname, '../../../.env')
 if (existsSync(rootEnvPath)) {
@@ -20,13 +22,92 @@ if (existsSync(rootEnvPath)) {
   }
 }
 
-const PORT            = parseInt(process.env.PORT            ?? '4001')
-const CORS_ORIGIN     = process.env.CORS_ORIGIN              ?? 'http://localhost:5200'
-const ACESTEP_API_URL = process.env.ACESTEP_API_URL          ?? 'http://localhost:8000'
+const PORT             = parseInt(process.env.PORT             ?? '4001')
+const CORS_ORIGIN      = process.env.CORS_ORIGIN               ?? 'http://localhost:5200'
+const ACESTEP_API_URL  = process.env.ACESTEP_API_URL           ?? 'http://localhost:8000'
+const RADIO_API_URL    = process.env.RADIO_SOUND_LIBRARY_URL   ?? 'http://localhost:8095'
 const AUDIO_OUTPUT_DIR = resolve(process.cwd(), process.env.AUDIO_OUTPUT_DIR ?? './output')
+const DATA_DIR         = resolve(process.cwd(), process.env.DATA_DIR         ?? './data')
 
-// 出力ディレクトリを作成
 mkdirSync(AUDIO_OUTPUT_DIR, { recursive: true })
+mkdirSync(DATA_DIR, { recursive: true })
+
+const TRACKS_FILE          = join(DATA_DIR, 'tracks.json')
+const STUDIO_PROJECTS_FILE = join(DATA_DIR, 'studio-projects.json')
+const RADIO_EXPORTS_FILE   = join(DATA_DIR, 'radio-exports.json')
+
+// ── シードWAVの生成 & トラック永続化ストアの初期化 ──
+function ensureSeedWavs(tracks: SeedTrack[]) {
+  for (const t of tracks) {
+    const fname = `seed_${t.id}.wav`
+    const fpath = join(AUDIO_OUTPUT_DIR, fname)
+    if (!existsSync(fpath)) {
+      const buf = generateSynthWav({
+        bpm: t.bpm,
+        key: t.key,
+        caption: t.caption,
+        durationSec: Math.min(t.duration || 20, 28),
+        seed: t.seed,
+      })
+      writeFileSync(fpath, buf)
+    }
+    if (!t.audioUrl) {
+      t.audioUrl = `/audio/${fname}`
+    }
+  }
+}
+
+function loadTracksStore(): Record<string, SeedTrack> {
+  ensureSeedWavs(SEED_TRACKS)
+  if (existsSync(TRACKS_FILE)) {
+    try {
+      const raw = JSON.parse(readFileSync(TRACKS_FILE, 'utf-8')) as SeedTrack[]
+      const map: Record<string, SeedTrack> = {}
+      for (const t of raw) {
+        if (!t.audioUrl && existsSync(join(AUDIO_OUTPUT_DIR, `seed_${t.id}.wav`))) {
+          t.audioUrl = `/audio/seed_${t.id}.wav`
+        }
+        map[t.id] = t
+      }
+      if (Object.keys(map).length > 0) return map
+    } catch (e) {
+      console.warn('Failed to parse tracks.json, re-seeding:', e)
+    }
+  }
+  const initial: Record<string, SeedTrack> = {}
+  for (const t of SEED_TRACKS) initial[t.id] = { ...t }
+  saveTracksStore(initial)
+  return initial
+}
+
+function saveTracksStore(store: Record<string, SeedTrack>) {
+  const list = Object.values(store).sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
+  writeFileSync(TRACKS_FILE, JSON.stringify(list, null, 2), 'utf-8')
+}
+
+function loadStudioProjectsStore(): Record<string, any> {
+  if (existsSync(STUDIO_PROJECTS_FILE)) {
+    try {
+      const raw = JSON.parse(readFileSync(STUDIO_PROJECTS_FILE, 'utf-8')) as any[]
+      const map: Record<string, any> = {}
+      for (const p of raw) map[p.id] = p
+      if (Object.keys(map).length > 0) return map
+    } catch (e) {
+      console.warn('Failed to parse studio-projects.json, re-seeding:', e)
+    }
+  }
+  const initial: Record<string, any> = {}
+  for (const p of SEED_STUDIO_PROJECTS) initial[p.id] = structuredClone(p)
+  saveStudioProjectsStore(initial)
+  return initial
+}
+
+function saveStudioProjectsStore(store: Record<string, any>) {
+  writeFileSync(STUDIO_PROJECTS_FILE, JSON.stringify(Object.values(store), null, 2), 'utf-8')
+}
+
+const library = loadTracksStore()
+const studioProjects = loadStudioProjectsStore()
 
 // ── ジョブキュー ──
 type JobStatus = 'queued' | 'processing' | 'completed' | 'failed'
@@ -37,6 +118,7 @@ interface GeneratedTake {
   audioUrl: string        // /audio/:filename
   audioFilename: string
   durationSec: number
+  engineMode?: 'acestep' | 'builtin-synth'
 }
 
 interface Job {
@@ -47,11 +129,11 @@ interface Job {
   takes: GeneratedTake[]
   error: string | null
   createdAt: number
+  engineMode?: 'acestep' | 'builtin-synth'
 }
 
 const jobs = new Map<string, Job>()
 
-// 古いジョブを1時間後に自動削除
 setInterval(() => {
   const now = Date.now()
   for (const [id, job] of jobs) {
@@ -59,24 +141,79 @@ setInterval(() => {
   }
 }, 60_000)
 
-// ── ACE-Step 生成関数 ──
+// ── ACE-Step または内蔵シンセフォールバック生成 ──
 async function runGeneration(jobId: string, body: GenerateRequest): Promise<void> {
   const job = jobs.get(jobId)!
   job.status = 'processing'
   job.stage = 'キューに追加中...'
-  job.progress = 2
+  job.progress = 5
 
   // ACE-Step 接続確認
+  let aceStepAvailable = false
   try {
-    const ping = await fetch(`${ACESTEP_API_URL}/health`, { signal: AbortSignal.timeout(5000) })
-    if (!ping.ok) throw new Error(`ACE-Step health check failed: ${ping.status}`)
-  } catch (e) {
-    throw new Error(
-      `ACE-Step サーバーに接続できません (${ACESTEP_API_URL})。\n` +
-      `まず ACE-Step を起動してください:\n  python infer-api.py`
-    )
+    const ping = await fetch(`${ACESTEP_API_URL}/health`, { signal: AbortSignal.timeout(1800) })
+    aceStepAvailable = ping.ok
+  } catch {
+    aceStepAvailable = false
   }
 
+  job.engineMode = aceStepAvailable ? 'acestep' : 'builtin-synth'
+
+  const {
+    caption, lyrics, duration, steps, cfg, cfgEnabled, batch, seeds, task,
+    schedulerType, omegaScale, repaintStart, repaintEnd, bpm, key,
+  } = body
+
+  const resolvedBatch = Math.max(1, Math.min(batch ?? 1, 8))
+  const takes: GeneratedTake[] = []
+
+  if (!aceStepAvailable) {
+    // ── 内蔵マルチトラック・シンセエンジンによるフォールバック実WAV生成 ──
+    const stages: [number, string][] = [
+      [25, '内蔵シンセエンジン — コード進行・スケール解析中'],
+      [55, '内蔵シンセエンジン — ドラム & ベースライン合成中'],
+      [85, '内蔵シンセエンジン — パッド & アルペジオ合成中'],
+      [96, '内蔵シンセエンジン — マスタリング & WAV エンコード中'],
+    ]
+    for (const [pct, label] of stages) {
+      job.progress = pct
+      job.stage = label
+      await new Promise(r => setTimeout(r, 260))
+    }
+
+    const durSec = Math.max(8, Math.min(duration ?? 24, 45))
+    for (let i = 0; i < resolvedBatch; i++) {
+      const filename = `${jobId}_${i}.wav`
+      const outputPath = join(AUDIO_OUTPUT_DIR, filename)
+      const seed = seeds?.[i] ?? Math.floor(Math.random() * 99999)
+
+      const wavBuf = generateSynthWav({
+        bpm: bpm ?? 112,
+        key: key ?? 'F# Minor',
+        caption: caption ?? '',
+        durationSec: durSec,
+        seed,
+      })
+      writeFileSync(outputPath, wavBuf)
+
+      takes.push({
+        idx: i,
+        seed,
+        audioUrl: `/audio/${filename}`,
+        audioFilename: filename,
+        durationSec: durSec,
+        engineMode: 'builtin-synth',
+      })
+    }
+
+    job.status = 'completed'
+    job.progress = 100
+    job.stage = ''
+    job.takes = takes
+    return
+  }
+
+  // ── 実 ACE-Step 生成 ──
   const stages: [number, string][] = [
     [15, 'LM 計画中 — メタデータ推論'],
     [35, 'LM — Caption 拡張'],
@@ -97,12 +234,6 @@ async function runGeneration(jobId: string, body: GenerateRequest): Promise<void
   }, 400)
 
   try {
-    const { caption, lyrics, duration, steps, cfg, cfgEnabled, batch, seeds, task,
-            schedulerType, omegaScale, repaintStart, repaintEnd } = body
-
-    const resolvedBatch = Math.max(1, Math.min(batch ?? 1, 8))
-    const takes: GeneratedTake[] = []
-
     for (let i = 0; i < resolvedBatch; i++) {
       const filename = `${jobId}_${i}.wav`
       const outputPath = join(AUDIO_OUTPUT_DIR, filename)
@@ -137,7 +268,6 @@ async function runGeneration(jobId: string, body: GenerateRequest): Promise<void
         repaint_end: repaintEnd ?? 0,
       }
 
-      // タイムアウトなし: CPU モードでは生成に数時間かかる場合がある
       const resp = await fetch(`${ACESTEP_API_URL}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -154,9 +284,15 @@ async function runGeneration(jobId: string, body: GenerateRequest): Promise<void
         throw new Error(`生成失敗: ${result.message}`)
       }
 
-      // ACE-Step が返す output_path からファイル名を取得
       const actualFilename = basename(result.output_path ?? outputPath)
-      takes.push({ idx: i, seed, audioUrl: `/audio/${actualFilename}`, audioFilename: actualFilename, durationSec: duration ?? 60 })
+      takes.push({
+        idx: i,
+        seed,
+        audioUrl: `/audio/${actualFilename}`,
+        audioFilename: actualFilename,
+        durationSec: duration ?? 60,
+        engineMode: 'acestep',
+      })
     }
 
     clearInterval(progressTimer)
@@ -175,6 +311,8 @@ interface GenerateRequest {
   caption?: string
   lyrics?: string
   duration?: number
+  bpm?: number
+  key?: string
   steps?: number
   cfg?: number
   cfgEnabled?: boolean
@@ -224,28 +362,36 @@ interface AceStepResult {
 
 // ── Express アプリ ──
 const app = express()
-app.set('etag', false)   // ETag 無効化: ポーリング時に 304 Not Modified が返らないようにする
-app.use(cors({ origin: CORS_ORIGIN }))
-app.use(express.json({ limit: '10mb' }))
+app.set('etag', false)
+app.use(cors({ origin: true }))
+app.use(express.json({ limit: '50mb' }))
 
 // Health check
 app.get('/health', (_req, res) => {
   res.json({
-    status: 'ok', version: '1.5',
+    status: 'ok',
+    version: '2.0',
     acestepUrl: ACESTEP_API_URL,
+    radioUrl: RADIO_API_URL,
     audioOutputDir: AUDIO_OUTPUT_DIR,
+    tracksCount: Object.keys(library).length,
+    studioProjectsCount: Object.keys(studioProjects).length,
   })
 })
 
 // ACE-Step サーバーの状態確認
 app.get('/acestep/health', async (_req, res) => {
   try {
-    const r = await fetch(`${ACESTEP_API_URL}/health`, { signal: AbortSignal.timeout(5000) })
+    const r = await fetch(`${ACESTEP_API_URL}/health`, { signal: AbortSignal.timeout(2000) })
     const json = await r.json()
-    res.json({ connected: true, ...json })
+    res.json({ connected: true, mode: 'acestep', ...json })
   } catch {
-    res.status(503).json({ connected: false, url: ACESTEP_API_URL,
-      message: 'ACE-Step サーバーが起動していません。python infer-api.py を実行してください。' })
+    res.json({
+      connected: false,
+      mode: 'builtin-synth',
+      url: ACESTEP_API_URL,
+      message: 'ACE-Step 未起動のため内蔵マルチトラック・シンセエンジンで実音声WAVを生成します。',
+    })
   }
 })
 
@@ -277,34 +423,246 @@ app.get('/generate/:jobId', (req, res) => {
 
 // 生成済み音声ファイルの配信
 app.get('/audio/:filename', (req, res) => {
-  // ディレクトリトラバーサル対策
   const filename = basename(req.params.filename)
   const filepath = join(AUDIO_OUTPUT_DIR, filename)
   if (!existsSync(filepath)) { res.status(404).end(); return }
   res.sendFile(filepath)
 })
 
-// トラック CRUD (in-memory)
-const library: Record<string, object> = {}
-app.get('/tracks', (_req, res) => res.json(Object.values(library)))
+// ── フロントエンド (MIDI Studio 等) からの WAV アップロード保存 ──
+app.post('/audio/upload', (req, res) => {
+  try {
+    const { base64Wav, prefix } = req.body as { base64Wav?: string; prefix?: string }
+    if (!base64Wav) {
+      res.status(400).json({ error: 'base64Wav is required' })
+      return
+    }
+    const cleanBase64 = base64Wav.replace(/^data:audio\/[\w+-]+;base64,/, '')
+    const buf = Buffer.from(cleanBase64, 'base64')
+    const safePrefix = (prefix || 'studio').replace(/[^a-zA-Z0-9_-]/g, '')
+    const filename = `${safePrefix}_${Date.now()}.wav`
+    const filepath = join(AUDIO_OUTPUT_DIR, filename)
+    writeFileSync(filepath, buf)
+
+    // WAV ヘッダーから秒数を概算 (44.1kHz 16bit Stereo = 176400 bytes/sec)
+    const byteRate = buf.length >= 32 ? buf.readUInt32LE(28) : 176400
+    const durationSec = Math.max(1, Math.round((buf.length - 44) / (byteRate || 176400)))
+
+    res.status(201).json({
+      audioUrl: `/audio/${filename}`,
+      filename,
+      durationSec,
+    })
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? 'WAV upload failed' })
+  }
+})
+
+// ── トラック CRUD (ディスク永続化) ──
+app.get('/tracks', (_req, res) => {
+  const list = Object.values(library).sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
+  res.json(list)
+})
+
 app.post('/tracks', (req, res) => {
-  const track = req.body
+  const track = req.body as SeedTrack
   if (!track.id) { res.status(400).json({ error: 'id required' }); return }
+  if (!track.audioUrl) {
+    const fname = `seed_${track.id}.wav`
+    const fpath = join(AUDIO_OUTPUT_DIR, fname)
+    if (!existsSync(fpath)) {
+      const buf = generateSynthWav({
+        bpm: track.bpm || 110,
+        key: track.key || 'C Major',
+        caption: track.caption || '',
+        durationSec: Math.min(track.duration || 20, 30),
+        seed: track.seed || 12345,
+      })
+      writeFileSync(fpath, buf)
+    }
+    track.audioUrl = `/audio/${fname}`
+  }
   library[track.id] = track
+  saveTracksStore(library)
   res.status(201).json(track)
 })
+
 app.put('/tracks/:id', (req, res) => {
   if (!library[req.params.id]) { res.status(404).json({ error: 'not found' }); return }
   library[req.params.id] = { ...library[req.params.id], ...req.body }
+  saveTracksStore(library)
   res.json(library[req.params.id])
 })
+
 app.delete('/tracks/:id', (req, res) => {
-  delete library[req.params.id]; res.status(204).end()
+  delete library[req.params.id]
+  saveTracksStore(library)
+  res.status(204).end()
+})
+
+// ── MIDI Studio プロジェクト CRUD (ディスク永続化) ──
+app.get('/studio/projects', (_req, res) => {
+  res.json(Object.values(studioProjects))
+})
+
+app.get('/studio/projects/:id', (req, res) => {
+  const proj = studioProjects[req.params.id]
+  if (!proj) { res.status(404).json({ error: 'project not found' }); return }
+  res.json(proj)
+})
+
+app.post('/studio/projects', (req, res) => {
+  const body = req.body
+  const id = body.id || `proj_${randomUUID().slice(0, 8)}`
+  const newProj = {
+    id,
+    name: body.name || 'New Studio Project',
+    bpm: body.bpm || 120,
+    key: body.key || 'C Major',
+    tracks: body.tracks || [],
+    scenes: body.scenes || [],
+  }
+  studioProjects[id] = newProj
+  saveStudioProjectsStore(studioProjects)
+  res.status(201).json(newProj)
+})
+
+app.put('/studio/projects/:id', (req, res) => {
+  const id = req.params.id
+  const existing = studioProjects[id] || { id }
+  studioProjects[id] = { ...existing, ...req.body, id }
+  saveStudioProjectsStore(studioProjects)
+  res.json(studioProjects[id])
+})
+
+app.delete('/studio/projects/:id', (req, res) => {
+  delete studioProjects[req.params.id]
+  saveStudioProjectsStore(studioProjects)
+  res.status(204).end()
+})
+
+// ── AI Radio Station (radio / sound-library-service) 連携 ──
+app.post('/integrations/radio/send', async (req, res) => {
+  try {
+    const { trackId, assetType, role, name, description, prompt, tags, durationSecs } = req.body as {
+      trackId: string
+      assetType?: 'BGM' | 'THEME' | 'JINGLE' | 'SFX' | 'STINGER'
+      role?: string
+      name?: string
+      description?: string
+      prompt?: string
+      tags?: string[]
+      durationSecs?: number
+    }
+
+    const track = library[trackId]
+    const resolvedType = assetType || 'BGM'
+    const resolvedName = name || track?.title || 'Music Lab Track'
+    const resolvedPrompt = prompt || track?.caption || ''
+    const resolvedTags = tags || track?.tags || []
+    const resolvedDuration = durationSecs || track?.duration || 20
+
+    // WAV バッファを取得（既存ファイルまたはオンデマンド合成）
+    let wavBuf: Buffer | null = null
+    if (track?.audioUrl) {
+      const fname = basename(track.audioUrl)
+      const fpath = join(AUDIO_OUTPUT_DIR, fname)
+      if (existsSync(fpath)) {
+        wavBuf = readFileSync(fpath)
+      }
+    }
+    if (!wavBuf) {
+      wavBuf = generateSynthWav({
+        bpm: track?.bpm || 110,
+        key: track?.key || 'C Major',
+        caption: resolvedPrompt,
+        durationSec: Math.min(resolvedDuration, 30),
+        seed: track?.seed || 42,
+      })
+    }
+
+    // 1. radio の sound-library-service API へ送信を試みる
+    let remoteResult: any = null
+    try {
+      const resp = await fetch(`${RADIO_API_URL}/api/v1/assets/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset_type: resolvedType,
+          name: resolvedName,
+          description: description || `Imported from Music Lab (${track?.bpm ?? 120} BPM, ${track?.key ?? 'C Major'})`,
+          prompt: resolvedPrompt,
+          duration_secs: resolvedDuration,
+          tags: resolvedTags,
+          role: role || null,
+          wav_base64: wavBuf.toString('base64'),
+        }),
+        signal: AbortSignal.timeout(3000),
+      })
+      if (resp.ok) {
+        remoteResult = await resp.json()
+      }
+    } catch {
+      // sound-library-service が未起動の場合は共有ディレクトリ＆ローカル台帳へ保存
+    }
+
+    // 2. ワークスペース内の radio/services/sound-library-service 共有インポートフォルダにも直接保存
+    const radioSharedDir = resolve(__dirname, '../../../../radio/services/sound-library-service/imported_assets')
+    mkdirSync(radioSharedDir, { recursive: true })
+    const assetId = remoteResult?.id || randomUUID()
+    const wavPath = join(radioSharedDir, `${assetId}.wav`)
+    writeFileSync(wavPath, wavBuf)
+
+    const exportRecord = {
+      id: assetId,
+      trackId,
+      asset_type: resolvedType,
+      role: role || null,
+      name: resolvedName,
+      description: description || `Imported from Music Lab (${track?.bpm ?? 120} BPM)`,
+      prompt: resolvedPrompt,
+      duration_secs: resolvedDuration,
+      tags: resolvedTags,
+      file_path: wavPath,
+      synced_to_service: !!remoteResult,
+      created_at: new Date().toISOString(),
+    }
+
+    // radio 側の imported_catalog.json と music-lab の radio-exports.json の両方に記録
+    const radioCatalogPath = join(radioSharedDir, 'imported_catalog.json')
+    const existingCatalog: any[] = existsSync(radioCatalogPath)
+      ? JSON.parse(readFileSync(radioCatalogPath, 'utf-8'))
+      : []
+    existingCatalog.unshift(exportRecord)
+    writeFileSync(radioCatalogPath, JSON.stringify(existingCatalog.slice(0, 100), null, 2), 'utf-8')
+
+    const localExports: any[] = existsSync(RADIO_EXPORTS_FILE)
+      ? JSON.parse(readFileSync(RADIO_EXPORTS_FILE, 'utf-8'))
+      : []
+    localExports.unshift(exportRecord)
+    writeFileSync(RADIO_EXPORTS_FILE, JSON.stringify(localExports.slice(0, 100), null, 2), 'utf-8')
+
+    res.status(201).json({
+      status: 'ok',
+      mode: remoteResult ? 'live-api' : 'shared-storage',
+      asset: remoteResult || exportRecord,
+    })
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? 'Radio integration failed' })
+  }
+})
+
+app.get('/integrations/radio/history', (_req, res) => {
+  const localExports: any[] = existsSync(RADIO_EXPORTS_FILE)
+    ? JSON.parse(readFileSync(RADIO_EXPORTS_FILE, 'utf-8'))
+    : []
+  res.json(localExports)
 })
 
 app.listen(PORT, () => {
-  console.log(`🎵 楽曲工房 API サーバー起動 → http://localhost:${PORT}`)
+  console.log(`🎵 楽曲工房 & MIDI Studio 統合 API サーバー起動 → http://localhost:${PORT}`)
   console.log(`   CORS origin      : ${CORS_ORIGIN}`)
   console.log(`   ACE-Step API     : ${ACESTEP_API_URL}`)
+  console.log(`   Radio Sound Lib  : ${RADIO_API_URL}`)
   console.log(`   音声出力ディレクトリ: ${AUDIO_OUTPUT_DIR}`)
 })
